@@ -39,7 +39,7 @@ def loadmat(filename):
 # --- Constants and Script Execution ---
 # Define the base directory for your data
 # IMPORTANT: Update this path to your actual data directory
-datagen_dir = '/home/ryanress/code/Data_for_paper/'
+datagen_dir = '/home/ryanress/code/gac-2024-v1-cognitive-map/data/'
 
 # Define the monkeys and tasks to be analyzed
 monkeys = ['monkeyF', 'monkeyN']
