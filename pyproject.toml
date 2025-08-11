@@ -19,7 +19,6 @@ dependencies = [
     "mat73",
     "pathlib",
     "ipykernel",
-    
 ]
 
 [tool.hatch.build.targets.wheel]

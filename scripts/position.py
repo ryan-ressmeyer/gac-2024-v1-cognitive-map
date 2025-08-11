@@ -499,20 +499,4 @@ plt.plot(dpi_r_y_win)
 plt.show()
 
 #%%
-# Detect Microsaccades
 
-
-speed = np.linalg.norm(np.diff(dpi_r_trials, axis=1), axis=2)
-
-
-iT = 21
-plt.figure()
-plt.subplot(211)
-plt.plot(t_trial, dpi_r_trials[iT,:,:1], c='k')
-plt.subplot(212)
-plt.plot(t_trial[:-1], speed[iT], c='k')
-plt.show()
-
-
-
-# %%
