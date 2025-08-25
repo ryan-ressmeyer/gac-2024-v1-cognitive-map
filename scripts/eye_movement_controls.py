@@ -2,8 +2,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-from utils import loadmat, smooth
-#%%
+from utils import loadmat, smooth, significance_connector
 
 # --- Constants and Script Execution ---
 # Define the base directory for your data
@@ -365,11 +364,6 @@ plt.show()
 # We are going to split the distribution of eye positions into quartiles and see if the MUA varies with eye position
 # We will also see if the affect of attention is still present in each quartiles
 
-def significance_connector(x1, x2, y, h, text, ax=None):
-    if ax is None:
-        ax = plt.gca()
-    ax.plot([x1, x1, x2, x2], [y, y+h, y+h, y], lw=1.5, c='k')
-    ax.text((x1+x2)*.5, y+h, text, ha='center', va='bottom', color='k')
 
 from scipy.stats import ttest_ind
 pos_mask = (pos_window[0] < t_dpi) & (t_dpi < pos_window[1])
