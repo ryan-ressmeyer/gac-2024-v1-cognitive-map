@@ -2,39 +2,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-
-def smooth(y, box_pts):
-    """
-    Smooths a 1D array using a moving average filter.
-
-    Args:
-        y (np.ndarray): The input 1D array to be smoothed.
-        box_pts (int): The size of the moving average window.
-
-    Returns:
-        np.ndarray: The smoothed array.
-    """
-    box = np.ones(box_pts) / box_pts
-    return np.convolve(y, box, mode='same')
-
-def loadmat(filename):
-    """
-    Load .mat file using the appropriate function based on the file version.
-
-    Args:
-        filename (str): The path to the .mat file.
-
-    Returns:
-        dict: The loaded data.
-    """
-    from scipy.io import loadmat as loadmat_scipy
-    from mat73 import loadmat as loadmat_mat73
-
-    try:
-        return loadmat_scipy(filename)
-    except Exception as e:
-        return loadmat_mat73(filename)
-
 #%%
 # --- Constants and Script Execution ---
 # Define the base directory for your data
@@ -47,13 +14,11 @@ monkeys = ['monkeyF', 'monkeyN']
 tasks = ['lums']
 task = tasks[0]
 
-
 # Set the Signal-to-Noise Ratio (SNR) threshold
 snr_threshold = 1.0
 
 # Create a Path object for the base data directory
 base_data_dir = Path(datagen_dir)
-
 
 #%%
 
@@ -226,6 +191,28 @@ ax1.spines['right'].set_visible(False)
 ax1.legend()
 ax1.set_title(f'{monkey.capitalize()} - {task.capitalize()} Task: Overall Activity')
 fig1.tight_layout()
+#%%
+
+trial_mua = normMUA[snr_mask,:,:].mean(axis=0)
+norm_trial_mua = trial_mua - trial_mua[:,:200].mean(axis=1)[:,None]
+
+attended_mua = norm_trial_mua[attended_trials].mean(axis=0)
+unattended_mua = norm_trial_mua[unattended_trials].mean(axis=0)
+
+plt.figure()
+plt.subplot(121)
+plt.title('raw')
+plt.imshow(trial_mua, vmin=-2, vmax=2, aspect='auto', cmap='coolwarm')
+plt.subplot(122)
+plt.title('normalized')
+plt.imshow(norm_trial_mua, vmin=-2, vmax=2, aspect='auto', cmap='coolwarm')
+plt.show()
+
+plt.figure()
+plt.plot(attended_mua, label='Attended')
+plt.plot(unattended_mua, label='Unattended')
+plt.plot()
+
 
 #%%
 
@@ -430,18 +417,17 @@ plt.figure()
 for i in range(n_bins):
     e0, e1 = edges[i], edges[i+1]
     mask = (e0 < dpi_r_y_win) & (dpi_r_y_win < e1)
-    activity = np.nanmean(normMUA[np.ix_(snr_mask, mask)], axis=(0,1))
+    activity = norm_trial_mua[mask].mean(axis=0)
     plt.plot(activity, label=f'{e0:.1f} - {e1:.1f}')
 plt.legend()
 plt.title('MUA conditioned on position')
 plt.show()
 
 #%%
-mua_signal = np.nanmean(normMUA[snr_mask], axis=0)
 eyepos_sorted = np.argsort(dpi_r_y_win)
 
 plt.figure()
-plt.imshow(mua_signal[eyepos_sorted], vmin=-2, vmax=2, cmap='coolwarm')
+plt.imshow(norm_trial_mua[eyepos_sorted], vmin=-2, vmax=2, cmap='coolwarm')
 plt.colorbar()
 plt.title('MUA sorted by vertical eye position')
 plt.show()
@@ -450,18 +436,16 @@ plt.show()
 
 # %%
 
-attn_activity = np.nanmean(normMUA[np.ix_(snr_mask, attended_mask)], axis=(0,1))
-unattn_activity = np.nanmean(normMUA[np.ix_(snr_mask, unattended_mask)], axis=(0,1))
 
 plt.figure(figsize=(8, 12))
 for i in range(n_bins):
     e0, e1 = edges[i], edges[i+1]
     mask = (e0 < dpi_r_y_win) & (dpi_r_y_win < e1)
-    attn_activity_ctrl = np.nanmean(normMUA[np.ix_(snr_mask, mask & attended_mask)], axis=(0,1))
-    unattn_activity_ctrl = np.nanmean(normMUA[np.ix_(snr_mask, mask & unattended_mask)], axis=(0,1))
+    attn_activity_ctrl = norm_trial_mua[mask & attended_mask].mean(axis=0)
+    unattn_activity_ctrl = norm_trial_mua[mask & unattended_mask].mean(axis=0)
     plt.subplot(n_bins, 1, i+1)
-    plt.plot(tb, attn_activity, c='k')
-    plt.plot(tb, unattn_activity, c='k')
+    plt.plot(tb, attended_activity, c='k')
+    plt.plot(tb, unattended_activity, c='k')
     plt.plot(tb, attn_activity_ctrl, label='Attended')
     plt.plot(tb, unattn_activity_ctrl, label='Unattended')
     plt.axvline(x=0, color='k', linestyle='--')
@@ -476,27 +460,24 @@ plt.show()
 # CONTROL -> Check to see if the affect changes over time and if 
 # the eye position also varies over time
 
+from scipy.stats import linregress
 n_blocks = 4
-n_trials = normMUA.shape[1]
+n_trials = norm_trial_mua.shape[0]
 plt.figure()
+plt.subplot(211)
 for i in range(n_blocks):
     i0, i1 = i*n_trials//n_blocks, (i+1)*n_trials//n_blocks
-    signal = np.nanmean(normMUA[np.ix_(snr_mask, np.arange(i0,i1))], axis=(0,1))
+    signal = norm_trial_mua[i0:i1].mean(axis=0)
     plt.plot(tb, signal, label=f'Block {i}: {i0} - {i1}')
 plt.legend()
 plt.axvline(x=0, color='k', linestyle='--')
-plt.show()
-
-#%%
-
-plt.figure()
-plt.imshow(mua_signal, vmin=-2, vmax=2, cmap='coolwarm')
-plt.colorbar()
-plt.title('MUA')
-plt.show()
-plt.figure()
+plt.subplot(212)
 plt.plot(dpi_r_y_win)
+slope, intercept, _, p, _ = linregress(np.arange(n_trials), dpi_r_y_win)
+plt.plot(intercept + slope*np.arange(n_trials), 'r--', label=f'slope = {slope:.2f}, p = {p:.2e}')
+plt.legend()
 plt.show()
 
 #%%
+
 
