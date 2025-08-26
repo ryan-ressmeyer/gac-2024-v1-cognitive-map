@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gac-2024-v1-cognitive-map"
-version = "0.0.0"
+version = "0.0.1"
 description = "Code for the 2024 Generative Adversarial Collaboration - Is V1 a Cognitive Map?"
 authors = [
     { name = "Ryan Ressmeyer", email = "ryan.ressmeyer@gmail.com" },
@@ -15,9 +15,11 @@ requires-python = ">=3.8"
 dependencies = [
     "numpy",
     "matplotlib",
+    "pyqt5",
+    "PySide2",
     "scipy",
     "mat73",
-    "pathlib",
+    "tqdm",
     "ipykernel",
 ]
 
