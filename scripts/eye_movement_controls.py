@@ -488,6 +488,7 @@ fig.suptitle('Raw Eye Position (All Trials Overlayed)')
 plt.tight_layout()
 if SAVE_FIGS:
     fig.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_raw_eye_position_post_filtering.png', dpi=300)
+    fig.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_raw_eye_position_post_filtering.svg')
 plt.show()
 
 # Apply filtering to all data arrays
@@ -586,6 +587,7 @@ plt.suptitle(f'{CURRENT_MONKEY.capitalize()} - Neural Data Preprocessing')
 plt.tight_layout()
 if SAVE_FIGS:
     plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_neural_data_preprocessing.png', dpi=300)
+    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_neural_data_preprocessing.svg')
 plt.show()
 
 #%%
@@ -624,6 +626,7 @@ plt.legend()
 plt.title(f'{CURRENT_MONKEY.capitalize()} - Baseline Attention Effect')
 if SAVE_FIGS:
     plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_baseline_attention_effect.png', dpi=300)
+    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_baseline_attention_effect.svg')
 plt.show()
 
 # Calculate and report attention effect magnitude
@@ -732,6 +735,7 @@ plt.legend()
 plt.tight_layout()
 if SAVE_FIGS:
     plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_savgol_filter_response.png', dpi=300)
+    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_savgol_filter_response.svg')
 plt.show()
 
 print(f"   - Filter preserves frequencies below ~50 Hz while attenuating noise")
@@ -805,6 +809,7 @@ fig.colorbar(h1[3], ax=axs[0,2], label='Counts')
 fig.colorbar(h2[3], ax=axs[1,2], label='Counts')
 if SAVE_FIGS:
     fig.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_sample_eye_position_trials.png', dpi=300)
+    fig.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_sample_eye_position_trials.svg')
 plt.show()
 
 #%%
@@ -887,6 +892,7 @@ plt.grid(True, alpha=0.3)
 plt.tight_layout()
 if SAVE_FIGS:
     plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_eye_position_by_attention_condition.png', dpi=300)
+    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_eye_position_by_attention_condition.svg')
 plt.show()  
 
 print("   - Green shaded region indicates time window for position analysis.")
@@ -939,6 +945,7 @@ plt.ylabel('Number of Trials')
 plt.tight_layout()
 if SAVE_FIGS:
     plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_eye_position_distribution.png', dpi=300)
+    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_eye_position_distribution.svg')
 plt.show()
 
 print("   - The difference in mean eye position is small compared to the overall distribution.")
@@ -983,6 +990,7 @@ fig.text(0.04, 0.5, 'Normalized MUA', va='center', rotation='vertical')
 plt.tight_layout(rect=[0.05, 0, 1, 1])
 if SAVE_FIGS:
     plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_mua_by_eye_position_quartile.png', dpi=300)
+    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_mua_by_eye_position_quartile.svg')
 plt.show()
 
 print("\nCONCLUSION for Control 1:")
@@ -1111,6 +1119,7 @@ axs[1].legend()
 plt.tight_layout(rect=[0, 0, 1, 0.96])
 if SAVE_FIGS:
     plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_microsaccade_timing.png', dpi=300)
+    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_microsaccade_timing.svg')
 plt.show()
 
 print("   - Note the characteristic suppression of microsaccades shortly after stimulus onset.")
@@ -1170,6 +1179,7 @@ axs[1].grid(True, alpha=0.3)
 plt.tight_layout(rect=[0, 0, 1, 0.95])
 if SAVE_FIGS:
     plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_mua_control_microsaccades.png', dpi=300)
+    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_mua_control_microsaccades.svg')
 plt.show()
 
 print("\nCONCLUSION for Control 2:")
@@ -1247,6 +1257,7 @@ plt.ylabel('Number of Trials')
 plt.tight_layout()
 if SAVE_FIGS:
     plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_path_length_distribution.png', dpi=300)
+    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_path_length_distribution.svg')
 plt.show()
 
 print("   - There is no significant difference in path length between attended and unattended trials.")
@@ -1292,6 +1303,7 @@ fig.text(0.04, 0.5, 'Normalized MUA', va='center', rotation='vertical')
 plt.tight_layout(rect=[0.05, 0, 1, 1])
 if SAVE_FIGS:
     plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_mua_by_path_length_quartile.png', dpi=300)
+    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_mua_by_path_length_quartile.svg')
 plt.show()
 
 print("""
