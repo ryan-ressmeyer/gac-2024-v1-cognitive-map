@@ -28,8 +28,7 @@ Install dependencies using uv:
 USAGE:
 ------
 1. First run preprocessing.py to generate preprocessed_data.h5
-2. Configure CURRENT_MONKEY parameter below
-3. Run this script: python scripts/analysis.py
+2. Run this script: python scripts/analysis.py (analyzes both monkeys simultaneously)
 
 OUTPUTS:
 --------
@@ -52,13 +51,188 @@ from matplotlib.backends.backend_pdf import PdfPages
 from tqdm import tqdm
 from utils import significance_connector, is_notebook
 import h5py
-np.random.seed(104) # For reproducibility
+np.random.seed(1001) # For reproducibility
 
 if is_notebook():
     matplotlib.use('inline')
 else:
     matplotlib.use('Qt5Agg')
 
+#%%
+# =============================================================================
+# HELPER FUNCTIONS FOR TWO-MONKEY ANALYSIS
+# =============================================================================
+
+def pvalue_to_stars(pval):
+    """
+    Convert p-value to star notation for significance display.
+
+    Args:
+        pval: p-value from statistical test
+
+    Returns:
+        str: Star notation (*** for p<0.001, ** for p<0.01, * for p<0.05, n.s. otherwise)
+    """
+    if pval < 0.001:
+        return '***'
+    elif pval < 0.01:
+        return '**'
+    elif pval < 0.05:
+        return '*'
+    else:
+        return 'n.s.'
+
+
+def add_significance_window(ax, window, pval, y_pos=0.6, bar_height=0.02):
+    """
+    Add a horizontal bar showing the counting window with significance stars.
+
+    Args:
+        ax: matplotlib axis
+        window: tuple of (start_time, end_time) for the counting window
+        pval: p-value to display
+        y_pos: y-position for the bar (default 0.6)
+        bar_height: height of the bar in data coordinates
+    """
+    # Draw horizontal bar for the window
+    ax.plot([window[0], window[1]], [y_pos, y_pos], 'k-', linewidth=3, solid_capstyle='butt')
+
+    # Add vertical caps at the ends
+    ax.plot([window[0], window[0]], [y_pos - bar_height/2, y_pos + bar_height/2], 'k-', linewidth=2)
+    ax.plot([window[1], window[1]], [y_pos - bar_height/2, y_pos + bar_height/2], 'k-', linewidth=2)
+
+    # Add p-value text with stars above the bar
+    stars = pvalue_to_stars(pval)
+    window_center = (window[0] + window[1]) / 2
+    if stars == 'n.s.':
+        text = f'{stars} (p={pval:.3f})'
+    else:
+        text = f'{stars} (p={pval:.1e})'
+    ax.text(window_center, y_pos + 0.05, text,
+            horizontalalignment='center', verticalalignment='bottom',
+            fontsize=14)
+
+
+def analyze_baseline_attention_effect(population_mua, trial_attended, t_rel_stim, attention_window, **kwargs):
+    """
+    Calculate attention effect statistics for baseline comparison.
+
+    Returns:
+        all_mua: mean MUA across all trials
+        attended_mua: mean MUA for attended trials
+        unattended_mua: mean MUA for unattended trials
+        stats: dict with means, difference, and p-value
+    """
+    all_mua = population_mua.mean(axis=0)
+    attended_mua = population_mua[trial_attended == 1].mean(axis=0)
+    unattended_mua = population_mua[trial_attended == 0].mean(axis=0)
+
+    # Calculate statistics in attention window
+    window_mask = (t_rel_stim >= attention_window[0]) & (t_rel_stim <= attention_window[1])
+    attended_window = population_mua[trial_attended == 1][:, window_mask].mean(axis=1)
+    unattended_window = population_mua[trial_attended == 0][:, window_mask].mean(axis=1)
+
+    stats = {
+        'mean_attended': attended_window.mean(),
+        'mean_unattended': unattended_window.mean(),
+        'difference': attended_window.mean() - unattended_window.mean(),
+        'pvalue': ttest_ind(attended_window, unattended_window).pvalue
+    }
+
+    return all_mua, attended_mua, unattended_mua, stats
+
+
+def calculate_eye_position_stats(eye_position, trial_attended, t_rel_stim, eye_position_window, **kwargs):
+    """
+    Calculate eye position statistics and quartiles.
+
+    Returns:
+        mean_attended: mean eye position over time for attended trials
+        ste_attended: standard error for attended trials
+        mean_unattended: mean eye position over time for unattended trials
+        ste_unattended: standard error for unattended trials
+        trial_pos_y: mean Y position per trial in analysis window
+        quartile_edges: bin edges for quartile analysis
+        pvalue: t-test p-value for Y position difference
+    """
+    # Calculate mean and STE for each condition
+    n_attended = np.sum(trial_attended == 1)
+    n_unattended = np.sum(trial_attended == 0)
+    mean_attended = eye_position[trial_attended == 1].mean(axis=0)
+    ste_attended = eye_position[trial_attended == 1].std(axis=0) / np.sqrt(n_attended)
+    mean_unattended = eye_position[trial_attended == 0].mean(axis=0)
+    ste_unattended = eye_position[trial_attended == 0].std(axis=0) / np.sqrt(n_unattended)
+
+    # Calculate mean Y position per trial in specified window
+    pos_mask = (t_rel_stim >= eye_position_window[0]) & (t_rel_stim <= eye_position_window[1])
+    trial_pos_y = eye_position[:, pos_mask, 1].mean(axis=1)
+
+    # Calculate quartile edges
+    quartile_edges = np.percentile(trial_pos_y, np.linspace(0, 100, 5))
+
+    # Calculate t-test
+    pvalue = ttest_ind(trial_pos_y[trial_attended == 1], trial_pos_y[trial_attended == 0]).pvalue
+
+    return mean_attended, ste_attended, mean_unattended, ste_unattended, trial_pos_y, quartile_edges, pvalue
+
+
+def detect_microsaccades(eye_speed, t_rel_stim, threshold, min_interval, total_trials, **kwargs):
+    """
+    Detect microsaccades using velocity threshold method.
+
+    Returns:
+        saccade_trials: array of trial indices with detected saccades
+        saccade_times: array of saccade times relative to stimulus
+        saccade_samples: list of sample indices per trial
+    """
+    saccade_trials_list = []
+    saccade_samples_list = []
+    saccade_times_list = []
+
+    for iT in tqdm(range(total_trials), desc="Detecting microsaccades"):
+        peaks, _ = find_peaks(eye_speed[iT, :], height=threshold, distance=min_interval)
+
+        if len(peaks) > 0:
+            saccade_samples_list.append(peaks)
+            saccade_trials_list.append(np.ones(len(peaks)) * iT)
+            saccade_times_list.append(t_rel_stim[peaks])
+
+    # Concatenate results
+    saccade_trials = np.concatenate(saccade_trials_list).astype(int) if saccade_trials_list else np.array([])
+    saccade_times = np.concatenate(saccade_times_list) if saccade_times_list else np.array([])
+    saccade_samples = saccade_samples_list
+
+    return saccade_trials, saccade_times, saccade_samples
+
+
+def calculate_path_length(eye_speed, trial_attended, t_rel_stim, drift_analysis_window, **kwargs):
+    """
+    Calculate path length (cumulative eye speed) statistics and quartiles.
+
+    Returns:
+        trial_path_length: path length for each trial
+        quartile_edges: bin edges for quartile analysis
+        mean_attended: mean path length for attended trials
+        mean_unattended: mean path length for unattended trials
+        pvalue: t-test p-value for path length difference
+    """
+    # Calculate path length for each trial
+    drift_mask = (t_rel_stim >= drift_analysis_window[0]) & (t_rel_stim <= drift_analysis_window[1])
+    trial_path_length = np.sum(eye_speed[:, drift_mask], axis=1)
+
+    # Calculate quartile edges
+    quartile_edges = np.percentile(trial_path_length, np.linspace(0, 100, 5))
+
+    # Calculate means and t-test
+    attended_path_length = trial_path_length[trial_attended == 1]
+    unattended_path_length = trial_path_length[trial_attended == 0]
+    mean_attended = attended_path_length.mean()
+    mean_unattended = unattended_path_length.mean()
+    pvalue = ttest_ind(attended_path_length, unattended_path_length).pvalue
+
+    return trial_path_length, quartile_edges, mean_attended, mean_unattended, pvalue
+
+#%%
 # =============================================================================
 # CONFIGURATION SECTION
 # =============================================================================
@@ -68,16 +242,15 @@ PREPROCESSED_DATA_FILE = Path(DATAGEN_DIR) / 'preprocessed_data.h5'
 
 # Analysis parameters
 MONKEYS = ['monkeyF', 'monkeyN']
-CURRENT_MONKEY = 'monkeyF'  # Switch between 'monkeyF' and 'monkeyN'
 CURRENT_TASK = 'lums'
 
 # Microsaccade detection parameters
-MICROSACCADE_THRESHOLD = 0.35  # Velocity threshold (deg/s)
+MICROSACCADE_THRESHOLD = 0.35 / 26.9 # Velocity threshold (deg/s)
 MIN_SACCADE_INTERVAL = 100  # Minimum time between saccades (ms at 1kHz = samples)
 EXPORT_SACCADE_PDF = False  # Export PDF with microsaccade detection for inspection
 
 # Analysis time windows
-ATTENTION_WINDOW = [0.15, 0.5]
+ATTENTION_WINDOW = [0.15, 0.4]
 MICROSACCADE_WINDOW = [0, 0.5]  # Time window for microsaccade exclusion (s)
 DRIFT_ANALYSIS_WINDOW = [0, 0.3]  # Time window for path length analysis (s)
 EYE_POSITION_WINDOW = [0.3, 0.4]  # Time window for mean position analysis (s)
@@ -94,37 +267,44 @@ if SAVE_FIGS:
 # =============================================================================
 
 print("="*70)
-print("EYE MOVEMENT CONTROL ANALYSIS")
+print("EYE MOVEMENT CONTROL ANALYSIS - TWO-MONKEY COMPARISON")
 print("="*70)
 print(f"Loading preprocessed data from: {PREPROCESSED_DATA_FILE}")
-print(f"Analyzing monkey: {CURRENT_MONKEY}")
+print(f"Analyzing monkeys: {', '.join(MONKEYS)}")
 print(f"Task: {CURRENT_TASK}")
 print("="*70)
 
-# Load data from HDF5
+# Load data for both monkeys from HDF5
+monkey_data = {}
+
 with h5py.File(PREPROCESSED_DATA_FILE, 'r') as f:
-    monkey_data = f[CURRENT_MONKEY]
+    for monkey in MONKEYS:
+        monkey_group = f[monkey]
 
-    # Load arrays
-    population_mua = monkey_data['population_mua'][:]
-    eye_position = monkey_data['eye_position_filtered'][:]
-    eye_velocity = monkey_data['eye_velocity'][:]
-    eye_speed = monkey_data['eye_speed'][:]
-    t_rel_stim = monkey_data['t_rel_stim'][:]
-    trial_attended = monkey_data['trial_attended'][:]
+        # Load arrays for this monkey
+        monkey_data[monkey] = {
+            'population_mua': monkey_group['population_mua'][:],
+            'eye_position': monkey_group['eye_position_filtered'][:],
+            'eye_velocity': monkey_group['eye_velocity'][:],
+            'eye_speed': monkey_group['eye_speed'][:],
+            't_rel_stim': monkey_group['t_rel_stim'][:],
+            'trial_attended': monkey_group['trial_attended'][:]
+        }
 
-# Compute trial masks and indices
-total_trials = population_mua.shape[0]
-attended_trials_mask = trial_attended == 1
-unattended_trials_mask = trial_attended == 0
-attended_trial_indices = np.where(attended_trials_mask)[0]
-unattended_trial_indices = np.where(unattended_trials_mask)[0]
+# Print summary statistics for both monkeys
+print("\nData Summary:")
+for monkey in MONKEYS:
+    data = monkey_data[monkey]
+    total_trials = data['population_mua'].shape[0]
+    n_attended = np.sum(data['trial_attended'] == 1)
+    n_unattended = np.sum(data['trial_attended'] == 0)
 
-print(f"\n   - Loaded {total_trials} trials")
-print(f"   - Attended trials: {len(attended_trial_indices)}")
-print(f"   - Unattended trials: {len(unattended_trial_indices)}")
-print(f"   - Population MUA shape: {population_mua.shape}")
-print(f"   - Eye data shape: {eye_position.shape}")
+    print(f"\n{monkey}:")
+    print(f"   - Total trials: {total_trials}")
+    print(f"   - Attended trials: {n_attended}")
+    print(f"   - Unattended trials: {n_unattended}")
+    print(f"   - Population MUA shape: {data['population_mua'].shape}")
+    print(f"   - Eye data shape: {data['eye_position'].shape}")
 
 #%%
 # =============================================================================
@@ -140,39 +320,57 @@ ANALYSIS: Compare average neural activity between attended and unattended trials
 
 print("\n1. Analyzing baseline attention effect on neural activity...")
 
-# Calculate attention effect: attended vs unattended average responses
-all_population_mua = population_mua.mean(axis=0)
-attended_population_mua = population_mua[attended_trial_indices].mean(axis=0)
-unattended_population_mua = population_mua[unattended_trial_indices].mean(axis=0)
+# Analyze both monkeys
+results = {}
+for monkey in MONKEYS:
+    all_mua, att_mua, unatt_mua, stats = analyze_baseline_attention_effect(
+        **monkey_data[monkey],
+        attention_window=ATTENTION_WINDOW
+    )
+    results[monkey] = {
+        'all_mua': all_mua,
+        'attended_mua': att_mua,
+        'unattended_mua': unatt_mua,
+        'stats': stats
+    }
 
-print(f"   - Attended trials: {len(attended_trial_indices)} trials")
-print(f"   - Unattended trials: {len(unattended_trial_indices)} trials")
+    n_attended = np.sum(monkey_data[monkey]['trial_attended'] == 1)
+    n_unattended = np.sum(monkey_data[monkey]['trial_attended'] == 0)
 
-# Create the baseline attention effect plot
-plt.figure()
-plt.plot(t_rel_stim, all_population_mua, color='gray', label='All Trials', alpha=0.7)
-plt.plot(t_rel_stim, unattended_population_mua, color='b', linewidth=2, label='Unattended')
-plt.plot(t_rel_stim, attended_population_mua, color='r', linewidth=2, label='Attended')
-plt.axvline(x=0, color='k', linestyle='--', linewidth=1)
-plt.grid()
-plt.xlabel('Time (s)')
-plt.ylabel('Normalized MUA')
-plt.legend()
-plt.title(f'{CURRENT_MONKEY.capitalize()} - Baseline Attention Effect')
+    print(f"\n{monkey}:")
+    print(f"   - Attended trials: {n_attended}")
+    print(f"   - Unattended trials: {n_unattended}")
+    print(f"   - Mean attended activity: {stats['mean_attended']:.3f}")
+    print(f"   - Mean unattended activity: {stats['mean_unattended']:.3f}")
+    print(f"   - Attention effect magnitude: {stats['difference']:.3f}")
+    print(f"   - p-value (t-test): {stats['pvalue']:.3e}")
+
+# Create side-by-side plots (MonkeyN left, MonkeyF right)
+fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+
+for idx, monkey in enumerate(['monkeyN', 'monkeyF']):
+    ax = axes[idx]
+    t_rel_stim = monkey_data[monkey]['t_rel_stim']
+
+    ax.plot(t_rel_stim, results[monkey]['all_mua'], color='gray', label='All Trials', alpha=0.7)
+    ax.plot(t_rel_stim, results[monkey]['unattended_mua'], color='b', linewidth=2, label='Unattended')
+    ax.plot(t_rel_stim, results[monkey]['attended_mua'], color='r', linewidth=2, label='Attended')
+    ax.axvline(x=0, color='k', linestyle='--', linewidth=1)
+
+    # Add counting window with significance
+    add_significance_window(ax, ATTENTION_WINDOW, results[monkey]['stats']['pvalue'])
+
+    ax.grid()
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Normalized MUA')
+    ax.legend()
+    ax.set_title(f'{monkey.capitalize()} - Baseline Attention Effect')
+
+plt.tight_layout()
 if SAVE_FIGS:
-    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_baseline_attention_effect.png', dpi=300)
-    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_baseline_attention_effect.svg')
+    plt.savefig(FIGURE_DIR / 'baseline_attention_effect.png', dpi=300)
+    plt.savefig(FIGURE_DIR / 'baseline_attention_effect.svg')
 plt.show()
-
-# Calculate and report attention effect magnitude
-attention_window_mask = (t_rel_stim >= ATTENTION_WINDOW[0]) & (t_rel_stim <= ATTENTION_WINDOW[1])
-attended_population_mua_window = population_mua[attended_trial_indices][:,attention_window_mask].mean(axis=1)
-unattended_population_mua_window = population_mua[unattended_trial_indices][:,attention_window_mask].mean(axis=1)
-attention_pvalue = ttest_ind(attended_population_mua_window, unattended_population_mua_window).pvalue
-print(f'   - Mean attended activity: {attended_population_mua_window.mean():.3f}')
-print(f'   - Mean unattended activity: {unattended_population_mua_window.mean():.3f}')
-print(f'   - Attention effect magnitude (mean difference): {attended_population_mua_window.mean() - unattended_population_mua_window.mean():.3f}')
-print(f'   - Mean attention effect p-value (t-test): {attention_pvalue:.3e}')
 
 #%%
 # =============================================================================
@@ -181,60 +379,71 @@ print(f'   - Mean attention effect p-value (t-test): {attention_pvalue:.3e}')
 
 print("\n   Visualizing sample eye position trials...")
 
-n_trials_to_plot = 5
-attn_plot = np.random.permutation(attended_trial_indices)[:n_trials_to_plot]
-unattn_plot = np.random.permutation(unattended_trial_indices)[:n_trials_to_plot]
-t_mask = (0 < t_rel_stim) & (t_rel_stim < 0.5)
-bins = np.linspace(-1, 1, 100)  # Position bins in degrees
-ep_unattn = eye_position[unattn_plot]
-ep_unattn_all = eye_position[unattended_trial_indices]
-ep_attn = eye_position[attn_plot]
-ep_attn_all = eye_position[attended_trial_indices]
+n_trials_to_plot = 3
+bins = np.linspace(-.75, .75, 50)  # Position bins in degrees
 
-fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+# Create 2x3 subplot (MonkeyN on top, MonkeyF on bottom)
+fig, axs = plt.subplots(2, 3, figsize=(15, 8), width_ratios=[1,1,.8])
 
-# Panel 1: X Position
-axs[0].plot(t_rel_stim, ep_unattn[:,:,0].T, alpha=0.7, c='b', linewidth=1)
-axs[0].plot(t_rel_stim, ep_attn[:,:,0].T, alpha=0.7, c='r', linewidth=1)
-axs[0].axvline(x=0, color='k', linestyle='--', linewidth=1.5, label='Stimulus Onset')
-axs[0].set_title('X Position')
-axs[0].set_ylabel('Position (degrees)')
-axs[0].set_xlabel('Time (s)')
-axs[0].set_ylim(-1, 1)
-axs[0].grid(True, alpha=0.3)
-lines = [
-    matplotlib.lines.Line2D([0], [0], color='b', lw=2, alpha=0.7),
-    matplotlib.lines.Line2D([0], [0], color='r', lw=2, alpha=0.7),
-    matplotlib.lines.Line2D([0], [0], color='k', lw=1.5, linestyle='--')
-]
-axs[0].legend(lines, ['Unattended Trials', 'Attended Trials', 'Stimulus Onset'])
+for row_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
+    data = monkey_data[monkey]
+    t_rel_stim = data['t_rel_stim']
+    eye_position = data['eye_position']
+    trial_attended = data['trial_attended']
 
-# Panel 2: Y Position
-axs[1].plot(t_rel_stim, ep_unattn[:,:,1].T, alpha=0.5, c='b', linewidth=1)
-axs[1].plot(t_rel_stim, ep_attn[:,:,1].T, alpha=0.5, c='r', linewidth=1)
-axs[1].axvline(x=0, color='k', linestyle='--', linewidth=1.5)
-axs[1].set_title('Y Position')
-axs[1].set_ylabel('Position (degrees)')
-axs[1].set_xlabel('Time (s)')
-axs[1].set_ylim(-1, 1)
-axs[1].grid(True, alpha=0.3)
+    # Select random trials to plot
+    attended_indices = np.where(trial_attended == 1)[0]
+    unattended_indices = np.where(trial_attended == 0)[0]
+    attn_plot = np.random.permutation(attended_indices)[:n_trials_to_plot]
+    unattn_plot = np.random.permutation(unattended_indices)[:n_trials_to_plot]
+    t_mask = (0 < t_rel_stim) & (t_rel_stim < 0.5)
 
-# Panel 3: 2D Histogram of all trials (0-500ms window)
-ep_all_trials = eye_position[:, t_mask, :]
-h = axs[2].hist2d(ep_all_trials[:,:,0].flatten(),
-                   ep_all_trials[:,:,1].flatten(),
-                   bins=[bins, bins], cmap='inferno')
-axs[2].set_title('2D Histogram (0-500 ms, All Trials)')
-axs[2].set_xlabel('X Position (degrees)')
-axs[2].set_ylabel('Y Position (degrees)')
-axs[2].set_aspect('equal')
-fig.colorbar(h[3], ax=axs[2], label='Counts')
+    ep_unattn = eye_position[unattn_plot]
+    ep_attn = eye_position[attn_plot]
 
-fig.suptitle(f'{CURRENT_MONKEY.capitalize()} - Sample Eye Position Trials', fontsize=14, y=1.02)
+    # Panel 1: X Position
+    axs[row_idx, 0].plot(t_rel_stim, ep_unattn[:,:,0].T, alpha=1, c='b', linewidth=1)
+    axs[row_idx, 0].plot(t_rel_stim, ep_attn[:,:,0].T, alpha=1, c='r', linewidth=1)
+    axs[row_idx, 0].axvline(x=0, color='k', linestyle='--', linewidth=1.5)
+    axs[row_idx, 0].set_title(f'{monkey.capitalize()} - X Position')
+    axs[row_idx, 0].set_ylabel('Position (degrees)')
+    axs[row_idx, 0].set_xlabel('Time (s)')
+    axs[row_idx, 0].set_ylim(-.75, .75)
+    axs[row_idx, 0].grid(True, alpha=0.3)
+    if row_idx == 0:  # Add legend only to top row
+        lines = [
+            matplotlib.lines.Line2D([0], [0], color='b', lw=2, alpha=0.7),
+            matplotlib.lines.Line2D([0], [0], color='r', lw=2, alpha=0.7),
+            matplotlib.lines.Line2D([0], [0], color='k', lw=1.5, linestyle='--')
+        ]
+        axs[row_idx, 0].legend(lines, ['Unattended', 'Attended', 'Stimulus Onset'])
+
+    # Panel 2: Y Position
+    axs[row_idx, 1].plot(t_rel_stim, ep_unattn[:,:,1].T, alpha=1, c='b', linewidth=1)
+    axs[row_idx, 1].plot(t_rel_stim, ep_attn[:,:,1].T, alpha=1, c='r', linewidth=1)
+    axs[row_idx, 1].axvline(x=0, color='k', linestyle='--', linewidth=1.5)
+    axs[row_idx, 1].set_title(f'{monkey.capitalize()} - Y Position')
+    axs[row_idx, 1].set_ylabel('Position (degrees)')
+    axs[row_idx, 1].set_xlabel('Time (s)')
+    axs[row_idx, 1].set_ylim(-.75, .75)
+    axs[row_idx, 1].grid(True, alpha=0.3)
+
+    # Panel 3: 2D Histogram of all trials (0-500ms window)
+    ep_all_trials = eye_position[:, t_mask, :]
+    h = axs[row_idx, 2].hist2d(ep_all_trials[:,:,0].flatten(),
+                       ep_all_trials[:,:,1].flatten(),
+                       bins=[bins, bins], cmap='inferno')
+    axs[row_idx, 2].set_title(f'{monkey.capitalize()} - 2D Histogram (0-500 ms)')
+    axs[row_idx, 2].set_xlabel('X Position (degrees)')
+    axs[row_idx, 2].set_ylabel('Y Position (degrees)')
+    axs[row_idx, 2].set_aspect('equal')
+    fig.colorbar(h[3], ax=axs[row_idx, 2], label='Counts')
+
+fig.suptitle('Sample Eye Position Trials', fontsize=16, y=0.995)
 fig.tight_layout()
 if SAVE_FIGS:
-    fig.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_sample_eye_position_trials.png', dpi=300)
-    fig.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_sample_eye_position_trials.svg')
+    fig.savefig(FIGURE_DIR / 'sample_eye_position_trials.png', dpi=300)
+    fig.savefig(FIGURE_DIR / 'sample_eye_position_trials.svg')
 plt.show()
 
 #%%
@@ -259,62 +468,79 @@ METHOD:
 
 print("\n2. CONTROL 1: Testing for differences in eye position between attention conditions...")
 
-# Calculate mean and 95% confidence intervals for eye position in each condition
-# Note: Using filtered, centered, and smoothed eye position data for this analysis
-mean_dpi_attended = np.mean(eye_position[attended_trials_mask], axis=0)
-ste_dpi_attended = np.std(eye_position[attended_trials_mask], axis=0) / np.sqrt(len(attended_trial_indices))
-mean_dpi_unattended = np.mean(eye_position[unattended_trials_mask], axis=0)
-ste_dpi_unattended = np.std(eye_position[unattended_trials_mask], axis=0) / np.sqrt(len(unattended_trial_indices))
+# Calculate statistics for both monkeys
+eye_pos_stats = {}
+for monkey in MONKEYS:
+    mean_att, ste_att, mean_unatt, ste_unatt, _, _, _ = calculate_eye_position_stats(
+        **monkey_data[monkey],
+        eye_position_window=EYE_POSITION_WINDOW
+    )
+    eye_pos_stats[monkey] = {
+        'mean_attended': mean_att,
+        'ste_attended': ste_att,
+        'mean_unattended': mean_unatt,
+        'ste_unattended': ste_unatt
+    }
 
-# Plot the mean eye position over time for both attention conditions
-plt.figure(figsize=(10, 10))
+# Plot the mean eye position over time for both monkeys (2 rows × 2 columns)
+# MonkeyN on left, MonkeyF on right
+fig, axes = plt.subplots(2, 2, figsize=(14, 10), sharex=True)
 
-# X-Position Plot
-plt.subplot(2, 1, 1)
-# Plot 95% confidence interval for unattended trials
-plt.fill_between(t_rel_stim,
-                 mean_dpi_unattended[:,0] - ste_dpi_unattended[:,0]*1.96,
-                 mean_dpi_unattended[:,0] + ste_dpi_unattended[:,0]*1.96,
-                 color='b', alpha=0.2, label='Unattended - 95% CI')
-plt.plot(t_rel_stim, mean_dpi_unattended[:,0], c='b', label='Unattended - Mean')
-# Plot 95% confidence interval for attended trials
-plt.fill_between(t_rel_stim,
-                 mean_dpi_attended[:,0] - ste_dpi_attended[:,0]*1.96,
-                 mean_dpi_attended[:,0] + ste_dpi_attended[:,0]*1.96,
-                 color='r', alpha=0.2, label='Attended - 95% CI')
-plt.plot(t_rel_stim, mean_dpi_attended[:,0], c='r', label='Attended - Mean')
-plt.legend()
-plt.title(f'{CURRENT_MONKEY.capitalize()} - {CURRENT_TASK.capitalize()} Task: Eye Position X')
-plt.axvline(x=0, color='k', linestyle='--')
-plt.ylabel('Horizontal Position (degrees)')
-plt.ylim(-15, 15)
-plt.grid(True, alpha=0.3)
+for col_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
+    t_rel_stim = monkey_data[monkey]['t_rel_stim']
+    stats = eye_pos_stats[monkey]
+    mean_att = stats['mean_attended']
+    ste_att = stats['ste_attended']
+    mean_unatt = stats['mean_unattended']
+    ste_unatt = stats['ste_unattended']
 
-# Y-Position Plot
-plt.subplot(2, 1, 2)
-plt.fill_between(t_rel_stim,
-                 mean_dpi_unattended[:,1] - ste_dpi_unattended[:,1]*1.96,
-                 mean_dpi_unattended[:,1] + ste_dpi_unattended[:,1]*1.96,
-                 color='b', alpha=0.2, label='Unattended - 95% CI')
-plt.plot(t_rel_stim, mean_dpi_unattended[:,1], c='b', label='Unattended - Mean')
-plt.fill_between(t_rel_stim,
-                 mean_dpi_attended[:,1] - ste_dpi_attended[:,1]*1.96,
-                 mean_dpi_attended[:,1] + ste_dpi_attended[:,1]*1.96,
-                 color='r', alpha=0.2, label='Attended - 95% CI')
-plt.plot(t_rel_stim, mean_dpi_attended[:,1], c='r', label='Attended - Mean')
-# Highlight the analysis window for mean position
-plt.fill_betweenx([-15, 15], EYE_POSITION_WINDOW[0], EYE_POSITION_WINDOW[1], color='g', alpha=0.1, label='Position Window', zorder=0)
-plt.axvline(x=0, color='k', linestyle='--')
-plt.ylim(-15, 15)
-plt.legend()
-plt.title('Y-Position')
-plt.xlabel('Time (s)')
-plt.ylabel('Vertical Position (degrees)')
-plt.grid(True, alpha=0.3)
+    # X-Position Plot (top row)
+    ax = axes[0, col_idx]
+    ax.fill_between(t_rel_stim,
+                    mean_unatt[:,0] - ste_unatt[:,0]*1.96,
+                    mean_unatt[:,0] + ste_unatt[:,0]*1.96,
+                    color='b', alpha=0.2, label='Unattended - 95% CI')
+    ax.plot(t_rel_stim, mean_unatt[:,0], c='b', label='Unattended')
+    ax.fill_between(t_rel_stim,
+                    mean_att[:,0] - ste_att[:,0]*1.96,
+                    mean_att[:,0] + ste_att[:,0]*1.96,
+                    color='r', alpha=0.2, label='Attended - 95% CI')
+    ax.plot(t_rel_stim, mean_att[:,0], c='r', label='Attended')
+    ax.axvline(x=0, color='k', linestyle='--')
+    ax.set_ylabel('Horizontal Position (degrees)')
+    ax.set_ylim(-.5, .5)
+    ax.set_title(f'{monkey.capitalize()} - X Position')
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    # Y-Position Plot (bottom row)
+    ax = axes[1, col_idx]
+    ax.fill_between(t_rel_stim,
+                    mean_unatt[:,1] - ste_unatt[:,1]*1.96,
+                    mean_unatt[:,1] + ste_unatt[:,1]*1.96,
+                    color='b', alpha=0.2, label='Unattended - 95% CI')
+    ax.plot(t_rel_stim, mean_unatt[:,1], c='b', label='Unattended')
+    ax.fill_between(t_rel_stim,
+                    mean_att[:,1] - ste_att[:,1]*1.96,
+                    mean_att[:,1] + ste_att[:,1]*1.96,
+                    color='r', alpha=0.2, label='Attended - 95% CI')
+    ax.plot(t_rel_stim, mean_att[:,1], c='r', label='Attended')
+    # Highlight the analysis window for mean position
+    ax.fill_betweenx([-15, 15], EYE_POSITION_WINDOW[0], EYE_POSITION_WINDOW[1],
+                     color='g', alpha=0.1, label='Position Window', zorder=0)
+    ax.axvline(x=0, color='k', linestyle='--')
+    ax.set_ylim(-.5, .5)
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Vertical Position (degrees)')
+    ax.set_title(f'{monkey.capitalize()} - Y Position')
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+fig.suptitle('Eye Position by Attention Condition', fontsize=16, y=0.995)
 plt.tight_layout()
 if SAVE_FIGS:
-    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_eye_position_by_attention_condition.png', dpi=300)
-    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_eye_position_by_attention_condition.svg')
+    plt.savefig(FIGURE_DIR / 'eye_position_by_attention_condition.png', dpi=300)
+    plt.savefig(FIGURE_DIR / 'eye_position_by_attention_condition.svg')
 plt.show()
 
 print("   - Green shaded region indicates time window for position analysis.")
@@ -328,90 +554,142 @@ print("   - Next, we will test if this small difference can explain the attentio
 # attention effect is present within each quartile.
 
 print("\n   Analyzing MUA within eye position quartiles...")
-# Define the time mask for calculating mean eye position per trial
-pos_mask = (t_rel_stim >= EYE_POSITION_WINDOW[0]) & (t_rel_stim <= EYE_POSITION_WINDOW[1])
 
-# Calculate the mean Y position for each trial within the defined window
-trial_pos_y = eye_position[:, pos_mask, 1].mean(axis=1)
-
-# Compare mean positions between conditions
-attn_pos_y = trial_pos_y[attended_trials_mask].mean()
-unattn_pos_y = trial_pos_y[unattended_trials_mask].mean()
-pval = ttest_ind(trial_pos_y[attended_trials_mask], trial_pos_y[unattended_trials_mask]).pvalue
-print(f'   - Mean attended Y position: {attn_pos_y:.2f} degrees')
-print(f'   - Mean unattended Y position: {unattn_pos_y:.2f} degrees')
-print(f'   - T-test for difference in mean Y position: p = {pval:.3f}')
-
-# Define quartile bins based on the overall distribution of eye positions
+# Calculate position statistics for both monkeys
 n_bins = 4
-edges = np.percentile(trial_pos_y, np.linspace(0, 100, n_bins + 1))
-print(f'   - Y position bin edges (quartiles): {np.round(edges, 2)}')
+position_data = {}
 
-# Plot the distribution of eye positions for visualization
-hist_bins = np.linspace(edges[0], edges[-1], 30)
-plt.figure(figsize=(8, 6))
-plt.hist(trial_pos_y, bins=hist_bins, label='All trials', color='gray', alpha=0.6)
-plt.hist(trial_pos_y[attended_trials_mask], bins=hist_bins, alpha=0.7, label='Attended', color='r')
-plt.hist(trial_pos_y[unattended_trials_mask], bins=hist_bins, alpha=0.7, label='Unattended', color='b')
+for monkey in MONKEYS:
+    _, _, _, _, trial_pos_y, edges, pval = calculate_eye_position_stats(
+        **monkey_data[monkey],
+        eye_position_window=EYE_POSITION_WINDOW
+    )
+    trial_attended = monkey_data[monkey]['trial_attended']
 
-# Add mean indicators and significance connector
-plt.scatter([attn_pos_y], [60], color='r', marker='v', s=100, label='Attended Mean', zorder=5)
-plt.scatter([unattn_pos_y], [60], color='b', marker='v', s=100, label='Unattended Mean', zorder=5)
-significance_connector(attn_pos_y, unattn_pos_y, 65, 5, f'p={pval:.3f}' if pval < 0.05 else 'n.s.')
-for e in edges:
-    plt.axvline(x=e, color='k', linestyle='--', label='Quartile edges' if e == edges[0] else None, alpha=0.5)
-plt.legend()
-plt.title('Distribution of Mean Y Eye Position (0.3-0.4s)')
-plt.xlabel('Mean Vertical Eye Position (degrees)')
-plt.ylabel('Number of Trials')
+    attn_pos_y = trial_pos_y[trial_attended == 1].mean()
+    unattn_pos_y = trial_pos_y[trial_attended == 0].mean()
+
+    position_data[monkey] = {
+        'trial_pos_y': trial_pos_y,
+        'edges': edges,
+        'pval': pval,
+        'attn_pos_y': attn_pos_y,
+        'unattn_pos_y': unattn_pos_y
+    }
+
+    print(f'\n{monkey}:')
+    print(f'   - Mean attended Y position: {attn_pos_y:.2f} degrees')
+    print(f'   - Mean unattended Y position: {unattn_pos_y:.2f} degrees')
+    print(f'   - T-test for difference in mean Y position: p = {pval:.3f}')
+    print(f'   - Y position bin edges (quartiles): {np.round(edges, 2)}')
+
+# Plot the distribution of eye positions for both monkeys (side-by-side)
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+for col_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
+    ax = axes[col_idx]
+    data = position_data[monkey]
+    trial_pos_y = data['trial_pos_y']
+    edges = data['edges']
+    pval = data['pval']
+    attn_pos_y = data['attn_pos_y']
+    unattn_pos_y = data['unattn_pos_y']
+    trial_attended = monkey_data[monkey]['trial_attended']
+
+    hist_bins = np.linspace(edges[0], edges[-1], 30)
+    ax.hist(trial_pos_y, bins=hist_bins, label='All trials', color='gray', alpha=0.6)
+    ax.hist(trial_pos_y[trial_attended == 1], bins=hist_bins, alpha=0.7, label='Attended', color='r')
+    ax.hist(trial_pos_y[trial_attended == 0], bins=hist_bins, alpha=0.7, label='Unattended', color='b')
+
+    # Add mean indicators and significance connector
+    ax.scatter([attn_pos_y], [60], color='r', marker='v', s=100, label='Attended Mean', zorder=5)
+    ax.scatter([unattn_pos_y], [60], color='b', marker='v', s=100, label='Unattended Mean', zorder=5)
+    significance_connector(attn_pos_y, unattn_pos_y, 65, 5, f'p={pval:.3f}' if pval < 0.05 else 'n.s.')
+
+    for e in edges:
+        ax.axvline(x=e, color='k', linestyle='--', label='Quartile edges' if e == edges[0] else None, alpha=0.5)
+
+    ax.legend()
+    ax.set_title(f'{monkey.capitalize()} - Mean Y Eye Position (0.3-0.4s)')
+    ax.set_xlabel('Mean Vertical Eye Position (degrees)')
+    ax.set_ylabel('Number of Trials')
+
+fig.suptitle('Distribution of Eye Position', fontsize=16, y=1.00)
 plt.tight_layout()
 if SAVE_FIGS:
-    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_eye_position_distribution.png', dpi=300)
-    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_eye_position_distribution.svg')
+    plt.savefig(FIGURE_DIR / 'eye_position_distribution.png', dpi=300)
+    plt.savefig(FIGURE_DIR / 'eye_position_distribution.svg')
 plt.show()
 
-print("   - The difference in mean eye position is small compared to the overall distribution.")
+print("\n   - The difference in mean eye position is small compared to the overall distribution.")
 print("   - Now, let's see if the MUA attention effect persists within each position quartile.")
 
 #%%
 # Plot MUA for attended vs. unattended trials within each eye position quartile
-fig, axs = plt.subplots(n_bins+1, 1, figsize=(8, 12), sharex=True, sharey=True)
-fig.suptitle(f'{CURRENT_MONKEY.capitalize()} - MUA Conditioned on Eye Position', y=1.02, fontsize=16)
+# Layout: 5 rows × 2 columns (MonkeyN left, MonkeyF right)
+fig, axs = plt.subplots(n_bins+1, 2, figsize=(14, 12), sharex=True, sharey=True)
+fig.suptitle('MUA Conditioned on Eye Position', y=0.995, fontsize=16)
 
-for i in range(n_bins):
-    e0, e1 = edges[i], edges[i+1]
-    # Create a mask for trials within the current position quartile
-    quartile_mask = (trial_pos_y >= e0) & (trial_pos_y <= e1)
+for col_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
+    data = monkey_data[monkey]
+    pos_data = position_data[monkey]
+    population_mua = data['population_mua']
+    trial_attended = data['trial_attended']
+    t_rel_stim = data['t_rel_stim']
+    trial_pos_y = pos_data['trial_pos_y']
+    edges = pos_data['edges']
 
-    # Calculate MUA for all, attended, and unattended trials in this quartile
-    all_activity = population_mua[quartile_mask].mean(axis=0)
-    attn_activity = population_mua[quartile_mask & attended_trials_mask]
-    unattn_activity = population_mua[quartile_mask & unattended_trials_mask]
-    pval = ttest_ind(attn_activity[:, attention_window_mask].mean(axis=1),
-                     unattn_activity[:, attention_window_mask].mean(axis=1)).pvalue
+    # Calculate attention window mask
+    attention_window_mask = (t_rel_stim >= ATTENTION_WINDOW[0]) & (t_rel_stim <= ATTENTION_WINDOW[1])
 
-    # Plotting
-    axs[0].plot(t_rel_stim, all_activity, label=f'Quartile {i+1}: [{e0:.1f}, {e1:.1f}] degrees')
-    axs[i+1].plot(t_rel_stim, all_activity, c='gray', alpha=0.5, label='All trials')
-    axs[i+1].plot(t_rel_stim, attn_activity.mean(axis=0), label='Attended', color='r')
-    axs[i+1].plot(t_rel_stim, unattn_activity.mean(axis=0), label='Unattended', color='b')
-    axs[i+1].axvline(x=0, color='k', linestyle='--')
-    axs[i+1].set_ylim(-.3, 1.3)
-    axs[i+1].axhline(y=0, color='k', linestyle='--', alpha=0.3, zorder=0)
-    axs[i+1].set_title(f'Quartile {i+1}: Y Position [{e0:.1f}, {e1:.1f}] degrees - ' + (f'p={pval:.1e}' if pval < 0.05 else 'n.s.'))
-    axs[i+1].grid(True, alpha=0.2)
-    if i == 0:
-        axs[i+1].legend()
+    for i in range(n_bins):
+        e0, e1 = edges[i], edges[i+1]
+        # Create a mask for trials within the current position quartile
+        quartile_mask = (trial_pos_y >= e0) & (trial_pos_y <= e1)
 
-axs[0].set_ylabel('Normalized MUA')
-axs[0].set_title('All Trials by Eye Position Quartile')
-axs[0].legend()
-axs[-1].set_xlabel('Time (s)')
-fig.text(0.04, 0.5, 'Normalized MUA', va='center', rotation='vertical')
-plt.tight_layout(rect=[0.05, 0, 1, 1])
+        # Calculate MUA for all, attended, and unattended trials in this quartile
+        all_activity = population_mua[quartile_mask].mean(axis=0)
+        attn_activity = population_mua[quartile_mask & (trial_attended == 1)]
+        unattn_activity = population_mua[quartile_mask & (trial_attended == 0)]
+        pval = ttest_ind(attn_activity[:, attention_window_mask].mean(axis=1),
+                         unattn_activity[:, attention_window_mask].mean(axis=1)).pvalue
+
+        # Plotting - row 0 shows all quartiles overlaid
+        axs[0, col_idx].plot(t_rel_stim, all_activity, label=f'Q{i+1}: [{e0:.1f}, {e1:.1f}]°')
+
+        # Plotting - rows 1-4 show individual quartiles with attention comparison
+        axs[i+1, col_idx].plot(t_rel_stim, all_activity, c='gray', alpha=0.5, label='All trials')
+        axs[i+1, col_idx].plot(t_rel_stim, attn_activity.mean(axis=0), label='Attended', color='r')
+        axs[i+1, col_idx].plot(t_rel_stim, unattn_activity.mean(axis=0), label='Unattended', color='b')
+        axs[i+1, col_idx].axvline(x=0, color='k', linestyle='--')
+        axs[i+1, col_idx].set_ylim(-.3, 1.3)
+        axs[i+1, col_idx].axhline(y=0, color='k', linestyle='--', alpha=0.3, zorder=0)
+
+        # Add counting window with significance
+        add_significance_window(axs[i+1, col_idx], ATTENTION_WINDOW, pval)
+
+        axs[i+1, col_idx].set_title(f'Q{i+1}: [{e0:.1f}, {e1:.1f}]°')
+        axs[i+1, col_idx].grid(True, alpha=0.2)
+        if i == 0:
+            axs[i+1, col_idx].legend()
+
+    # Configure top row
+    axs[0, col_idx].set_ylabel('Normalized MUA')
+    axs[0, col_idx].set_title(f'{monkey.capitalize()} - All Quartiles')
+    axs[0, col_idx].legend()
+    axs[0, col_idx].grid(True, alpha=0.2)
+    axs[0, col_idx].axvline(x=0, color='k', linestyle='--')
+
+# Set x-labels for bottom row
+axs[-1, 0].set_xlabel('Time (s)')
+axs[-1, 1].set_xlabel('Time (s)')
+
+# Add y-axis label
+fig.text(0.04, 0.5, 'Normalized MUA', va='center', rotation='vertical', fontsize=12)
+plt.tight_layout(rect=[0.05, 0, 1, 0.99])
 if SAVE_FIGS:
-    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_mua_by_eye_position_quartile.png', dpi=300)
-    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_mua_by_eye_position_quartile.svg')
+    plt.savefig(FIGURE_DIR / 'mua_by_eye_position_quartile.png', dpi=300)
+    plt.savefig(FIGURE_DIR / 'mua_by_eye_position_quartile.svg')
 plt.show()
 
 print("\nCONCLUSION for Control 1:")
@@ -447,100 +725,80 @@ print(f"   - Threshold: {MICROSACCADE_THRESHOLD} degrees/ms")
 print(f"   - Minimum intersaccade distance: {MIN_SACCADE_INTERVAL} ms")
 print(f"   - Analysis window: {MICROSACCADE_WINDOW[0]}-{MICROSACCADE_WINDOW[1]} s")
 
-# Initialize lists to store detected saccade properties
-saccade_trials = []
-saccade_samples = []
-saccade_times = []
+# Detect microsaccades for both monkeys
+microsaccade_data = {}
+for monkey in MONKEYS:
+    data = monkey_data[monkey]
+    total_trials = data['population_mua'].shape[0]
 
-# Optionally create a PDF for manual inspection of detection quality
-if EXPORT_SACCADE_PDF:
-    pdf_filename = f'{CURRENT_MONKEY}_{CURRENT_TASK}_microsaccades_inspection.pdf'
-    print(f"   - Exporting saccade detection plots to: {pdf_filename}")
-    pdf = PdfPages(pdf_filename)
+    saccade_trials, saccade_times, saccade_samples = detect_microsaccades(
+        eye_speed=data['eye_speed'],
+        t_rel_stim=data['t_rel_stim'],
+        threshold=MICROSACCADE_THRESHOLD,
+        min_interval=MIN_SACCADE_INTERVAL,
+        total_trials=total_trials
+    )
 
-try:
-    # Loop through each trial to detect microsaccades
-    for iT in tqdm(range(total_trials), desc="Detecting microsaccades"):
-        # Use scipy's find_peaks on the eye speed signal
-        peaks, _ = find_peaks(eye_speed[iT, :], height=MICROSACCADE_THRESHOLD, distance=MIN_SACCADE_INTERVAL)
+    microsaccade_data[monkey] = {
+        'saccade_trials': saccade_trials,
+        'saccade_times': saccade_times,
+        'saccade_samples': saccade_samples,
+        'total_trials': total_trials
+    }
 
-        # Store results if any peaks are found
-        if len(peaks) > 0:
-            saccade_samples.append(peaks)
-            saccade_trials.append(np.ones(len(peaks)) * iT)
-            saccade_times.append(t_rel_stim[peaks])
-
-        # If exporting, create a plot for the current trial and save to PDF
-        if EXPORT_SACCADE_PDF:
-            fig = plt.figure(figsize=(10, 6))
-            # Plot X and Y position
-            plt.subplot(2, 1, 1)
-            plt.plot(t_rel_stim, eye_position[iT, :, 0], label='X-pos')
-            plt.plot(t_rel_stim, eye_position[iT, :, 1], label='Y-pos', color='gray')
-            if len(peaks) > 0:
-                for p_time in t_rel_stim[peaks]:
-                    plt.axvline(x=p_time, color='r', linestyle='--', alpha=0.7)
-            plt.title(f'Trial {iT} - Eye Position')
-            plt.legend(loc='upper right')
-            plt.grid(True, alpha=0.3)
-            # Plot eye speed and detected peaks
-            plt.subplot(2, 1, 2)
-            plt.plot(t_rel_stim, eye_speed[iT, :], label='Speed')
-            if len(peaks) > 0:
-                plt.plot(t_rel_stim[peaks], eye_speed[iT, peaks], 'rx', label='Detected Saccade')
-            plt.axhline(y=MICROSACCADE_THRESHOLD, color='r', linestyle='--', label='Threshold')
-            plt.ylim(0, 1)
-            plt.title('Eye Speed')
-            plt.xlabel('Time (s)')
-            plt.legend(loc='upper right')
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
-            pdf.savefig(fig)
-            plt.close(fig)
-finally:
-    if EXPORT_SACCADE_PDF:
-        pdf.close()
-
-# Concatenate results from all trials into single numpy arrays
-saccade_trials = np.concatenate(saccade_trials).astype(int)
-saccade_times = np.concatenate(saccade_times)
-
-print(f'   - Detected {len(saccade_times)} microsaccades across {total_trials} trials')
+    print(f'\n{monkey}:')
+    print(f'   - Detected {len(saccade_times)} microsaccades across {total_trials} trials')
 
 #%%
 # Visualize microsaccade timing across all trials
-fig, axs = plt.subplots(2, 1, figsize=(8, 8), height_ratios=[2, 1], sharex=True)
-fig.suptitle("Microsaccade Timing Across All Trials", fontsize=16)
+# Layout: 2 rows × 2 columns (MonkeyN left, MonkeyF right)
+fig, axs = plt.subplots(2, 2, figsize=(14, 8), sharex=True)
+fig.suptitle("Microsaccade Timing Across All Trials", fontsize=16, y=0.995)
 
-# Raster plot of microsaccade times for each trial
-axs[0].eventplot([saccade_times[saccade_trials==iT] for iT in range(total_trials)], linelengths=5, linewidths=2, colors='k')
-axs[0].axvline(x=0, color='r', linestyle='--', alpha=0.7)
-axs[0].set_xlim(t_rel_stim[0], t_rel_stim[-1])
-axs[0].set_ylim(0, total_trials)
-axs[0].set_ylabel('Trial')
-axs[0].set_title('Microsaccade Raster Plot')
-axs[0].grid(True, axis='x', alpha=0.3)
+for col_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
+    msacc_data = microsaccade_data[monkey]
+    saccade_trials = msacc_data['saccade_trials']
+    saccade_times = msacc_data['saccade_times']
+    total_trials = msacc_data['total_trials']
+    t_rel_stim = monkey_data[monkey]['t_rel_stim']
 
-# Histogram of microsaccade times
-axs[1].hist(saccade_times, bins=np.linspace(t_rel_stim[0], t_rel_stim[-1], 70), color='k')
-axs[1].axvline(x=0, color='r', linestyle='--', alpha=0.7, label='Stimulus Onset')
-axs[1].annotate('Pre-stimulus\nmicrosaccades', xy=(-.1, 20), xytext=(-.05, 40),
-             arrowprops=dict(facecolor='black', arrowstyle='->'),
-             horizontalalignment='center')
-axs[1].annotate('Post-stimulus\nsuppression', xy=(0.1, 5), xytext=(0.15, 30),
-             arrowprops=dict(facecolor='black', arrowstyle='->'),
-             horizontalalignment='center')
-axs[1].annotate('Choice saccades', xy=(.45, 9), xytext=(.35, 40),
-             arrowprops=dict(facecolor='black', arrowstyle='->'),
-             horizontalalignment='center')
-axs[1].set_xlabel('Time (s)')
-axs[1].set_ylabel('Number of Saccades')
-axs[1].set_title('Microsaccade Rate Histogram')
-axs[1].legend()
-plt.tight_layout(rect=[0, 0, 1, 0.96])
+    # Raster plot of microsaccade times for each trial
+    if len(saccade_times) > 0:
+        axs[0, col_idx].eventplot([saccade_times[saccade_trials==iT] for iT in range(total_trials)],
+                                   linelengths=5, linewidths=2, colors='k')
+    axs[0, col_idx].axvline(x=0, color='r', linestyle='--', alpha=0.7)
+    axs[0, col_idx].set_xlim(t_rel_stim[0], t_rel_stim[-1])
+    axs[0, col_idx].set_ylim(0, total_trials)
+    axs[0, col_idx].set_ylabel('Trial')
+    axs[0, col_idx].set_title(f'{monkey.capitalize()} - Raster Plot')
+    axs[0, col_idx].grid(True, axis='x', alpha=0.3)
+
+    # Histogram of microsaccade times
+    if len(saccade_times) > 0:
+        axs[1, col_idx].hist(saccade_times, bins=np.linspace(t_rel_stim[0], t_rel_stim[-1], 70), color='k')
+    axs[1, col_idx].axvline(x=0, color='r', linestyle='--', alpha=0.7, label='Stimulus Onset')
+
+    # Add annotations only to the left column to avoid clutter
+    if col_idx == 0:
+        axs[1, col_idx].annotate('Pre-stimulus\nmicrosaccades', xy=(-.1, 20), xytext=(-.05, 40),
+                 arrowprops=dict(facecolor='black', arrowstyle='->'),
+                 horizontalalignment='center')
+        axs[1, col_idx].annotate('Post-stimulus\nsuppression', xy=(0.1, 5), xytext=(0.15, 30),
+                 arrowprops=dict(facecolor='black', arrowstyle='->'),
+                 horizontalalignment='center')
+        axs[1, col_idx].annotate('Choice saccades', xy=(.45, 9), xytext=(.35, 40),
+                 arrowprops=dict(facecolor='black', arrowstyle='->'),
+                 horizontalalignment='center')
+
+    axs[1, col_idx].set_xlabel('Time (s)')
+    axs[1, col_idx].set_ylabel('Number of Saccades')
+    axs[1, col_idx].set_title(f'{monkey.capitalize()} - Rate Histogram')
+    axs[1, col_idx].legend()
+
+plt.tight_layout(rect=[0, 0, 1, 0.99])
 if SAVE_FIGS:
-    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_microsaccade_timing.png', dpi=300)
-    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_microsaccade_timing.svg')
+    plt.savefig(FIGURE_DIR / 'microsaccade_timing.png', dpi=300)
+    plt.savefig(FIGURE_DIR / 'microsaccade_timing.svg')
 plt.show()
 
 print("   - Note the characteristic suppression of microsaccades shortly after stimulus onset.")
@@ -549,63 +807,105 @@ print("   - Since feedforward effects are most critical, we will exclude trials 
 #%%
 # Compare attention effect in trials with vs. without microsaccades in the critical window.
 
-# Identify trials that have at least one microsaccade within the specified window
-msacc_window_mask = (saccade_times > MICROSACCADE_WINDOW[0]) & (saccade_times < MICROSACCADE_WINDOW[1])
-trials_with_msacc = np.unique(saccade_trials[msacc_window_mask])
+# Calculate microsaccade trial masks and MUA for both monkeys
+msacc_control_results = {}
 
-# Create a boolean mask for all trials
-msacc_trials_mask = np.zeros(total_trials, dtype=bool)
-msacc_trials_mask[trials_with_msacc] = True
-no_msacc_trials_mask = ~msacc_trials_mask
+for monkey in MONKEYS:
+    msacc_data = microsaccade_data[monkey]
+    data = monkey_data[monkey]
+    saccade_trials = msacc_data['saccade_trials']
+    saccade_times = msacc_data['saccade_times']
+    total_trials = msacc_data['total_trials']
+    population_mua = data['population_mua']
+    trial_attended = data['trial_attended']
+    t_rel_stim = data['t_rel_stim']
 
-print(f'   - {np.sum(msacc_trials_mask)} trials WITH microsaccades between {MICROSACCADE_WINDOW[0]}-{MICROSACCADE_WINDOW[1]} s')
-print(f'   - {np.sum(no_msacc_trials_mask)} trials WITHOUT microsaccades in this window.')
+    # Identify trials that have at least one microsaccade within the specified window
+    if len(saccade_times) > 0:
+        msacc_window_mask = (saccade_times > MICROSACCADE_WINDOW[0]) & (saccade_times < MICROSACCADE_WINDOW[1])
+        trials_with_msacc = np.unique(saccade_trials[msacc_window_mask])
+    else:
+        trials_with_msacc = np.array([])
 
-# Calculate MUA for trials without microsaccades, separated by attention
-no_saccade_attended_mua = population_mua[no_msacc_trials_mask & attended_trials_mask].mean(axis=0)
-no_saccade_unattended_mua = population_mua[no_msacc_trials_mask & unattended_trials_mask].mean(axis=0)
+    # Create a boolean mask for all trials
+    msacc_trials_mask = np.zeros(total_trials, dtype=bool)
+    if len(trials_with_msacc) > 0:
+        msacc_trials_mask[trials_with_msacc] = True
+    no_msacc_trials_mask = ~msacc_trials_mask
 
-pval = ttest_ind(
-    population_mua[no_msacc_trials_mask & attended_trials_mask][:, attention_window_mask].mean(axis=1),
-    population_mua[no_msacc_trials_mask & unattended_trials_mask][:, attention_window_mask].mean(axis=1)
-).pvalue
+    print(f'\n{monkey}:')
+    print(f'   - {np.sum(msacc_trials_mask)} trials WITH microsaccades between {MICROSACCADE_WINDOW[0]}-{MICROSACCADE_WINDOW[1]} s')
+    print(f'   - {np.sum(no_msacc_trials_mask)} trials WITHOUT microsaccades in this window.')
 
-print(f'   - Attention effect in no-microsaccade trials: p = {pval:.3e}')
+    # Calculate MUA for trials without microsaccades, separated by attention
+    no_saccade_attended_mua = population_mua[no_msacc_trials_mask & (trial_attended == 1)].mean(axis=0)
+    no_saccade_unattended_mua = population_mua[no_msacc_trials_mask & (trial_attended == 0)].mean(axis=0)
 
-# Calculate MUA for saccade vs. no-saccade trials (collapsed across attention)
-saccade_mua = population_mua[msacc_trials_mask].mean(axis=0)
-no_saccade_mua = population_mua[no_msacc_trials_mask].mean(axis=0)
+    # Calculate attention window mask
+    attention_window_mask = (t_rel_stim >= ATTENTION_WINDOW[0]) & (t_rel_stim <= ATTENTION_WINDOW[1])
 
-# Plotting the results
-fig, axs = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
-fig.suptitle("Controlling for Microsaccade Effects", fontsize=16)
+    pval = ttest_ind(
+        population_mua[no_msacc_trials_mask & (trial_attended == 1)][:, attention_window_mask].mean(axis=1),
+        population_mua[no_msacc_trials_mask & (trial_attended == 0)][:, attention_window_mask].mean(axis=1)
+    ).pvalue
 
-# Plot 1: Attention effect in trials WITHOUT microsaccades
-axs[0].plot(t_rel_stim, no_saccade_unattended_mua, label='Unattended', color='b')
-axs[0].plot(t_rel_stim, no_saccade_attended_mua, label='Attended', color='r')
-axs[0].axvline(x=0, color='k', linestyle='--')
-axs[0].set_title(f'Attention Effect ({np.sum(no_msacc_trials_mask)} Trials WITHOUT Microsaccades)')
-axs[0].set_xlabel('Time (s)')
-axs[0].set_ylabel('Normalized MUA')
-axs[0].legend()
-axs[0].grid(True, alpha=0.3)
+    print(f'   - Attention effect in no-microsaccade trials: p = {pval:.3e}')
 
-# Plot 2: MUA difference between saccade and no-saccade trials
-axs[1].plot(t_rel_stim, saccade_mua, label='Saccade Trials', color='g')
-axs[1].plot(t_rel_stim, no_saccade_mua, label='No Saccade Trials', color='k')
-axs[1].axvline(x=0, color='k', linestyle='--')
-axs[1].set_title('MUA: Saccade vs. No Saccade Trials')
-axs[1].set_xlabel('Time (s)')
-axs[1].legend()
-axs[1].grid(True, alpha=0.3)
-plt.tight_layout(rect=[0, 0, 1, 0.95])
+    # Calculate MUA for saccade vs. no-saccade trials (collapsed across attention)
+    saccade_mua = population_mua[msacc_trials_mask].mean(axis=0) if np.sum(msacc_trials_mask) > 0 else np.zeros_like(t_rel_stim)
+    no_saccade_mua = population_mua[no_msacc_trials_mask].mean(axis=0)
+
+    msacc_control_results[monkey] = {
+        'no_saccade_attended_mua': no_saccade_attended_mua,
+        'no_saccade_unattended_mua': no_saccade_unattended_mua,
+        'saccade_mua': saccade_mua,
+        'no_saccade_mua': no_saccade_mua,
+        'pval': pval,
+        'n_no_msacc': np.sum(no_msacc_trials_mask)
+    }
+
+# Plotting the results (2 rows × 2 columns)
+# Row 0: Attention effect in no-saccade trials (MonkeyN left, MonkeyF right)
+# Row 1: Saccade vs no-saccade comparison (MonkeyN left, MonkeyF right)
+fig, axs = plt.subplots(2, 2, figsize=(14, 10), sharey='row')
+fig.suptitle("Controlling for Microsaccade Effects", fontsize=16, y=0.995)
+
+for col_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
+    results = msacc_control_results[monkey]
+    t_rel_stim = monkey_data[monkey]['t_rel_stim']
+
+    # Row 0: Attention effect in trials WITHOUT microsaccades
+    axs[0, col_idx].plot(t_rel_stim, results['no_saccade_unattended_mua'], label='Unattended', color='b')
+    axs[0, col_idx].plot(t_rel_stim, results['no_saccade_attended_mua'], label='Attended', color='r')
+    axs[0, col_idx].axvline(x=0, color='k', linestyle='--')
+
+    # Add counting window with significance
+    add_significance_window(axs[0, col_idx], ATTENTION_WINDOW, results['pval'])
+
+    axs[0, col_idx].set_title(f'{monkey.capitalize()} - Attention Effect ({results["n_no_msacc"]} Trials)')
+    axs[0, col_idx].set_xlabel('Time (s)')
+    axs[0, col_idx].set_ylabel('Normalized MUA')
+    axs[0, col_idx].legend()
+    axs[0, col_idx].grid(True, alpha=0.3)
+
+    # Row 1: MUA difference between saccade and no-saccade trials
+    axs[1, col_idx].plot(t_rel_stim, results['saccade_mua'], label='Saccade Trials', color='g')
+    axs[1, col_idx].plot(t_rel_stim, results['no_saccade_mua'], label='No Saccade Trials', color='k')
+    axs[1, col_idx].axvline(x=0, color='k', linestyle='--')
+    axs[1, col_idx].set_title(f'{monkey.capitalize()} - Saccade vs. No Saccade')
+    axs[1, col_idx].set_xlabel('Time (s)')
+    axs[1, col_idx].set_ylabel('Normalized MUA')
+    axs[1, col_idx].legend()
+    axs[1, col_idx].grid(True, alpha=0.3)
+
+plt.tight_layout(rect=[0, 0, 1, 0.99])
 if SAVE_FIGS:
-    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_mua_control_microsaccades.png', dpi=300)
-    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_mua_control_microsaccades.svg')
+    plt.savefig(FIGURE_DIR / 'mua_control_microsaccades.png', dpi=300)
+    plt.savefig(FIGURE_DIR / 'mua_control_microsaccades.svg')
 plt.show()
 
 print("\nCONCLUSION for Control 2:")
-print(f"   - A strong attention effect persists in trials completely free of microsaccades during the stimulus period (p={pval:.1e}).")
+print("   - A strong attention effect persists in trials completely free of microsaccades during the stimulus period.")
 print("   - Therefore, the V1 attention effect is NOT driven by microsaccadic eye movements.")
 
 #%%
@@ -635,95 +935,138 @@ HYPOTHESIS: If attention effects are due to drift differences, then:
 print("\n4. CONTROL 3: Ocular drift (path length) analysis...")
 print(f"   - Analysis window: {DRIFT_ANALYSIS_WINDOW[0]}-{DRIFT_ANALYSIS_WINDOW[1]} s")
 
-# Define time mask for drift analysis
-drift_mask = (t_rel_stim >= DRIFT_ANALYSIS_WINDOW[0]) & (t_rel_stim <= DRIFT_ANALYSIS_WINDOW[1])
-
-# Calculate path length for each trial by summing speed within the window
-trial_path_length = np.sum(eye_speed[:, drift_mask], axis=1)
-
-# Separate path lengths by attention condition
-attended_path_length = trial_path_length[attended_trials_mask]
-unattended_path_length = trial_path_length[unattended_trials_mask]
-
-# Compare mean path length between conditions
-mean_attended_path_length = np.mean(attended_path_length)
-mean_unattended_path_length = np.mean(unattended_path_length)
-pval = ttest_ind(attended_path_length, unattended_path_length).pvalue
-print(f'   - Mean attended path length: {mean_attended_path_length:.2f}')
-print(f'   - Mean unattended path length: {mean_unattended_path_length:.2f}')
-print(f'   - T-test for difference in path length: p = {pval:.3f}')
-
-# Define quartile bins based on the overall distribution of path lengths
+# Calculate path length statistics for both monkeys
 n_bins = 4
-edges = np.percentile(trial_path_length, np.linspace(0, 100, n_bins + 1))
-print(f'   - Path length bin edges (quartiles): {np.round(edges, 2)}')
+path_length_data = {}
 
-# Plot the distribution of path lengths
-bins = np.linspace(trial_path_length.min(), trial_path_length.max(), 30)
-plt.figure(figsize=(8, 6))
-plt.hist(trial_path_length, bins=bins, color='gray', label='All Trials', alpha=0.6)
-plt.hist(attended_path_length, bins=bins, alpha=0.7, label='Attended', color='r')
-plt.hist(unattended_path_length, bins=bins, alpha=0.7, label='Unattended', color='b')
+for monkey in MONKEYS:
+    trial_path_length, edges, mean_att, mean_unatt, pval = calculate_path_length(
+        **monkey_data[monkey],
+        drift_analysis_window=DRIFT_ANALYSIS_WINDOW
+    )
 
-# Add mean indicators and significance
-plt.scatter([mean_attended_path_length], [60], color='r', marker='v', s=100, label='Attended Mean', zorder=5)
-plt.scatter([mean_unattended_path_length], [60], color='b', marker='v', s=100, label='Unattended Mean', zorder=5)
-significance_connector(mean_attended_path_length, mean_unattended_path_length, 65, 5, 'n.s.' if pval > 0.05 else f'p={pval:.3f}')
-for e in edges:
-    plt.axvline(x=e, color='k', linestyle='--', label='Quartile edges' if e == edges[0] else None, alpha=0.5)
-plt.legend()
-plt.title(f'Distribution of Path Lengths ({DRIFT_ANALYSIS_WINDOW[0]}-{DRIFT_ANALYSIS_WINDOW[1]}s)')
-plt.xlabel('Path Length (arbitrary units)')
-plt.ylabel('Number of Trials')
+    path_length_data[monkey] = {
+        'trial_path_length': trial_path_length,
+        'edges': edges,
+        'mean_attended': mean_att,
+        'mean_unattended': mean_unatt,
+        'pval': pval
+    }
+
+    print(f'\n{monkey}:')
+    print(f'   - Mean attended path length: {mean_att:.2f}')
+    print(f'   - Mean unattended path length: {mean_unatt:.2f}')
+    print(f'   - T-test for difference in path length: p = {pval:.3f}')
+    print(f'   - Path length bin edges (quartiles): {np.round(edges, 2)}')
+
+# Plot the distribution of path lengths for both monkeys (side-by-side)
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+for col_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
+    ax = axes[col_idx]
+    data = path_length_data[monkey]
+    trial_path_length = data['trial_path_length']
+    edges = data['edges']
+    pval = data['pval']
+    mean_att = data['mean_attended']
+    mean_unatt = data['mean_unattended']
+    trial_attended = monkey_data[monkey]['trial_attended']
+
+    bins = np.linspace(trial_path_length.min(), trial_path_length.max(), 30)
+    ax.hist(trial_path_length, bins=bins, color='gray', label='All Trials', alpha=0.6)
+    ax.hist(trial_path_length[trial_attended == 1], bins=bins, alpha=0.7, label='Attended', color='r')
+    ax.hist(trial_path_length[trial_attended == 0], bins=bins, alpha=0.7, label='Unattended', color='b')
+
+    # Add mean indicators and significance
+    ax.scatter([mean_att], [60], color='r', marker='v', s=100, label='Attended Mean', zorder=5)
+    ax.scatter([mean_unatt], [60], color='b', marker='v', s=100, label='Unattended Mean', zorder=5)
+    significance_connector(mean_att, mean_unatt, 65, 5, 'n.s.' if pval > 0.05 else f'p={pval:.3f}')
+
+    for e in edges:
+        ax.axvline(x=e, color='k', linestyle='--', label='Quartile edges' if e == edges[0] else None, alpha=0.5)
+
+    ax.legend()
+    ax.set_title(f'{monkey.capitalize()} - Path Lengths ({DRIFT_ANALYSIS_WINDOW[0]}-{DRIFT_ANALYSIS_WINDOW[1]}s)')
+    ax.set_xlabel('Path Length (arbitrary units)')
+    ax.set_ylabel('Number of Trials')
+
+fig.suptitle('Distribution of Path Lengths', fontsize=16, y=1.00)
 plt.tight_layout()
 if SAVE_FIGS:
-    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_path_length_distribution.png', dpi=300)
-    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_path_length_distribution.svg')
+    plt.savefig(FIGURE_DIR / 'path_length_distribution.png', dpi=300)
+    plt.savefig(FIGURE_DIR / 'path_length_distribution.svg')
 plt.show()
 
-print("   - There is no significant difference in path length between attended and unattended trials.")
+print("\n   - There is no significant difference in path length between attended and unattended trials.")
 print("   - Nevertheless, we will check if the attention effect persists within each path length quartile as a stringent control.")
 
 #%%
 # Plot MUA for attended vs. unattended trials within each path length quartile
-fig, axs = plt.subplots(n_bins+1, 1, figsize=(8, 12), sharex=True, sharey=True)
-fig.suptitle(f'{CURRENT_MONKEY.capitalize()} - MUA Conditioned on Path Length', y=1.02, fontsize=16)
+# Layout: 5 rows × 2 columns (MonkeyN left, MonkeyF right)
+fig, axs = plt.subplots(n_bins+1, 2, figsize=(14, 12), sharex=True, sharey=True)
+fig.suptitle('MUA Conditioned on Path Length', y=0.995, fontsize=16)
 
-for i in range(n_bins):
-    e0, e1 = edges[i], edges[i+1]
-    # Create a mask for trials within the current path length quartile
-    quartile_mask = (trial_path_length >= e0) & (trial_path_length <= e1)
+for col_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
+    data = monkey_data[monkey]
+    path_data = path_length_data[monkey]
+    population_mua = data['population_mua']
+    trial_attended = data['trial_attended']
+    t_rel_stim = data['t_rel_stim']
+    trial_path_length = path_data['trial_path_length']
+    edges = path_data['edges']
 
-    # Calculate MUA for all, attended, and unattended trials in this quartile
-    all_mua = population_mua[quartile_mask].mean(axis=0)
-    attended_mua = population_mua[quartile_mask & attended_trials_mask].mean(axis=0)
-    unattended_mua = population_mua[quartile_mask & unattended_trials_mask].mean(axis=0)
+    # Calculate attention window mask
+    attention_window_mask = (t_rel_stim >= ATTENTION_WINDOW[0]) & (t_rel_stim <= ATTENTION_WINDOW[1])
 
-    pval = ttest_ind(
-        population_mua[quartile_mask & attended_trials_mask][:, attention_window_mask].mean(axis=1),
-        population_mua[quartile_mask & unattended_trials_mask][:, attention_window_mask].mean(axis=1)
-    ).pvalue
+    for i in range(n_bins):
+        e0, e1 = edges[i], edges[i+1]
+        # Create a mask for trials within the current path length quartile
+        quartile_mask = (trial_path_length >= e0) & (trial_path_length <= e1)
 
-    # Plotting
-    axs[0].plot(t_rel_stim, all_mua, label='Quartile ' + str(i+1))
-    axs[i+1].plot(t_rel_stim, all_mua, c='gray', alpha=0.5, label='All trials')
-    axs[i+1].plot(t_rel_stim, attended_mua, label='Attended', color='r')
-    axs[i+1].plot(t_rel_stim, unattended_mua, label='Unattended', color='b')
-    axs[i+1].set_title(f'Quartile {i+1}: Path Length [{edges[i]:.2f}, {edges[i+1]:.2f}] - ' + (f'p={pval:.1e}' if pval < 0.05 else 'n.s.'))
-    axs[i+1].axvline(x=0, color='k', linestyle='--')
-    axs[i+1].grid(True, alpha=0.2)
-    axs[i+1].axhline(y=0, color='k', linestyle='--', alpha=0.3, zorder=0)
-    if i == 0:
-        axs[i+1].legend()
+        # Calculate MUA for all, attended, and unattended trials in this quartile
+        all_mua = population_mua[quartile_mask].mean(axis=0)
+        attended_mua = population_mua[quartile_mask & (trial_attended == 1)].mean(axis=0)
+        unattended_mua = population_mua[quartile_mask & (trial_attended == 0)].mean(axis=0)
 
-axs[0].set_title('All Trials by Path Length Quartile')
-axs[0].legend()
-axs[-1].set_xlabel('Time (s)')
-fig.text(0.04, 0.5, 'Normalized MUA', va='center', rotation='vertical')
-plt.tight_layout(rect=[0.05, 0, 1, 1])
+        pval = ttest_ind(
+            population_mua[quartile_mask & (trial_attended == 1)][:, attention_window_mask].mean(axis=1),
+            population_mua[quartile_mask & (trial_attended == 0)][:, attention_window_mask].mean(axis=1)
+        ).pvalue
+
+        # Plotting - row 0 shows all quartiles overlaid
+        axs[0, col_idx].plot(t_rel_stim, all_mua, label=f'Q{i+1}')
+
+        # Plotting - rows 1-4 show individual quartiles with attention comparison
+        axs[i+1, col_idx].plot(t_rel_stim, all_mua, c='gray', alpha=0.5, label='All trials')
+        axs[i+1, col_idx].plot(t_rel_stim, attended_mua, label='Attended', color='r')
+        axs[i+1, col_idx].plot(t_rel_stim, unattended_mua, label='Unattended', color='b')
+        axs[i+1, col_idx].axvline(x=0, color='k', linestyle='--')
+        axs[i+1, col_idx].grid(True, alpha=0.2)
+        axs[i+1, col_idx].axhline(y=0, color='k', linestyle='--', alpha=0.3, zorder=0)
+
+        # Add counting window with significance
+        add_significance_window(axs[i+1, col_idx], ATTENTION_WINDOW, pval)
+
+        axs[i+1, col_idx].set_title(f'Q{i+1}: [{edges[i]:.2f}, {edges[i+1]:.2f}]')
+        if i == 0:
+            axs[i+1, col_idx].legend()
+
+    # Configure top row
+    axs[0, col_idx].set_title(f'{monkey.capitalize()} - All Quartiles')
+    axs[0, col_idx].legend()
+    axs[0, col_idx].grid(True, alpha=0.2)
+    axs[0, col_idx].axvline(x=0, color='k', linestyle='--')
+
+# Set x-labels for bottom row
+axs[-1, 0].set_xlabel('Time (s)')
+axs[-1, 1].set_xlabel('Time (s)')
+
+# Add y-axis label
+fig.text(0.04, 0.5, 'Normalized MUA', va='center', rotation='vertical', fontsize=12)
+plt.tight_layout(rect=[0.05, 0, 1, 0.99])
 if SAVE_FIGS:
-    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_mua_by_path_length_quartile.png', dpi=300)
-    plt.savefig(FIGURE_DIR / f'{CURRENT_MONKEY}_mua_by_path_length_quartile.svg')
+    plt.savefig(FIGURE_DIR / 'mua_by_path_length_quartile.png', dpi=300)
+    plt.savefig(FIGURE_DIR / 'mua_by_path_length_quartile.svg')
 plt.show()
 
 print("""
