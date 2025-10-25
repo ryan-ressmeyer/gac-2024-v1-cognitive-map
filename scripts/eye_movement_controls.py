@@ -56,11 +56,6 @@ OUTPUTS:
 - Demonstrates persistence of attention effects after controlling for eye movements
 
 Author: Ryan Ressmeyer
-
-TODO:
-    - Get MonkeyF full eye tracker data (right now only 941 of 1199 trials have eye data, and it unclear which eye trials go with which behavioral trials)
-    - Adjust windows for MonkeyF
-    - Allow left eye analysis (currently only right eye is implemented)
 """
 
 #%%
@@ -87,7 +82,7 @@ DATAGEN_DIR = '/home/ryanress/code/gac-2024-v1-cognitive-map/data/'
 # Analysis parameters
 MONKEYS = ['monkeyF', 'monkeyN']
 TASKS = ['lums']  # Focus on luminance attention task
-CURRENT_MONKEY = 'monkeyN'  # Switch between 'monkeyF' and 'monkeyN'
+CURRENT_MONKEY = 'monkeyF'  # Switch between 'monkeyF' and 'monkeyN'
 CURRENT_TASK = TASKS[0]
 
 # Signal processing parameters
@@ -112,8 +107,8 @@ if SAVE_FIGS:
 # Analysis time windows
 PRE_STIMULUS_DURATION = 0.2  # seconds
 POST_STIMULUS_DURATION = 0.5  # seconds
-ATTENTION_WINDOW = [0.2, 0.4]
-MICROSACCADE_WINDOW = [0, 0.4]  # Time window for microsaccade exclusion (s)
+ATTENTION_WINDOW = [0.15, 0.5]
+MICROSACCADE_WINDOW = [0, 0.5]  # Time window for microsaccade exclusion (s)
 DRIFT_ANALYSIS_WINDOW = [0, 0.3]  # Time window for path length analysis (s)
 EYE_POSITION_WINDOW = [0.3, 0.4]  # Time window for mean position analysis (s)
 
@@ -124,6 +119,7 @@ DPI_SAMPLING_RATE = 1/500  # Original DPI sampling rate before upsampling
 # Create Path object for data directory
 BASE_DATA_DIR = Path(DATAGEN_DIR)
 
+#%%
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
@@ -310,6 +306,7 @@ if total_trials != ALLMAT.shape[0]:
     attended_trial_indices = np.where(attended_trials_mask)[0]
     unattended_trial_indices = np.where(unattended_trials_mask)[0]
     print(f"   - Aligned to {total_trials} trials")
+
 #%%
 print("""
 # =============================================================================  
@@ -446,8 +443,8 @@ if CURRENT_MONKEY == 'monkeyN':
     }
 else:  # monkeyF - haven't set specific limits yet
     eye_position_limits = {
-        'attended_y_lim': [200, 400],
-        'unattended_y_lim': [-100, 300],
+        'attended_y_lim': [-100, 300],
+        'unattended_y_lim': [0, 400],
         'attended_x_lim': [-200, 100],
         'unattended_x_lim': [-200, 100]
     }
@@ -1149,6 +1146,7 @@ pval = ttest_ind(
     population_mua[no_msacc_trials_mask & unattended_trials_mask][:, attention_window_mask].mean(axis=1)
 ).pvalue
 
+print(f'   - Attention effect in no-microsaccade trials: p = {pval:.3e}')
 
 # Calculate MUA for saccade vs. no-saccade trials (collapsed across attention)
 saccade_mua = population_mua[msacc_trials_mask].mean(axis=0)

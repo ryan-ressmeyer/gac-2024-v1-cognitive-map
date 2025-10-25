@@ -118,3 +118,12 @@ The eye movement controls script provides comprehensive microsaccade detection a
 Update data paths in scripts to match your local setup:
 - Example script: Update `DATADIR_GEN` variable
 - Eye movement controls: Update `datagen_dir` variable
+
+## Script Writing Convention
+**IMPORTANT**: All .py files in the scripts/ directory should be written as flat scripts for interactive use in IPython/VSCode:
+
+- Use #%% cell delimiters to separate logical code blocks
+- Define functions ONLY for reusable code that is called multiple times
+- Write code that runs once (data loading, analysis, plotting) at the lowest indentation level (not inside functions or if __name__ == '__main__' blocks)
+- This enables cell-by-cell execution in interactive environments
+- Exception: Only deviate from this pattern when explicitly instructed otherwise
