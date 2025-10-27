@@ -29,7 +29,7 @@ def significance_connector(x1, x2, y, h, text, ax=None):
     if ax is None:
         ax = plt.gca()
     ax.plot([x1, x1, x2, x2], [y, y+h, y+h, y], lw=1.5, c='k')
-    ax.text((x1+x2)*.5, y+h, text, ha='center', va='bottom', color='k')
+    ax.text((x1+x2)*.5, y+h*1.1, text, ha='center', va='bottom', color='k')
 def smooth(y, box_pts):
     """
     Smooths a 1D array using a moving average filter.

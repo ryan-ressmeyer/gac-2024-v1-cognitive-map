@@ -359,8 +359,9 @@ def preprocess_eye_data(dpi_trials, t_rel_stim, sampling_rate=EYE_SAMPLING_RATE,
     # This filter is optimal for derivative calculations needed for velocity
     dpi_filtered = savgol_filter(dpi_centered, SAVGOL_WINDOW, SAVGOL_ORDER, axis=1)
 
+    dt = t_rel_stim[1] - t_rel_stim[0]  # Time step after decimation
     # Calculate velocity (first derivative) and speed (magnitude)
-    dpi_velocity = np.diff(dpi_filtered, axis=1, prepend=0)
+    dpi_velocity = np.diff(dpi_filtered, axis=1, prepend=dpi_filtered[:, :1, :]) / dt
     dpi_speed = np.linalg.norm(dpi_velocity, axis=2)
 
     # Use provided time vector (aligned with MUA data)
@@ -414,7 +415,7 @@ with h5py.File(OUTPUT_FILE, 'w') as hf:
         print(f"   - Neural data shape: {normalized_mua.shape}")
 
         # Validate and filter trials based on attention condition
-        # ALLMAT column 4 (Python index 3): 1 = attended, 2 = unattended
+        # ALLMAT column 4 (Python index 3): 2 = attended, 1 = unattended
         attention_condition = ALLMAT[:, 3]
         valid_attention_mask = (attention_condition == 1) | (attention_condition == 2)
 
@@ -428,7 +429,7 @@ with h5py.File(OUTPUT_FILE, 'w') as hf:
             print(f"   - Remaining trials after attention filtering: {ALLMAT.shape[0]}")
 
         # Create trial_attended vector: 1 for attended, 0 for unattended
-        trial_attended = (attention_condition == 1).astype(np.int32)
+        trial_attended = (attention_condition == 2).astype(np.int32)
 
         # Define attention conditions for later use
         attended_trials_mask = trial_attended == 1

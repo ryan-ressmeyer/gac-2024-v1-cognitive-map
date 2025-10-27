@@ -105,9 +105,9 @@ def add_significance_window(ax, window, pval, y_pos=0.6, bar_height=0.02):
     stars = pvalue_to_stars(pval)
     window_center = (window[0] + window[1]) / 2
     if stars == 'n.s.':
-        text = f'{stars} (p={pval:.3f})'
+        text = f'{stars}\n(p={pval:.3f})'
     else:
-        text = f'{stars} (p={pval:.1e})'
+        text = f'{stars}\n(p={pval:.1e})'
     ax.text(window_center, y_pos + 0.05, text,
             horizontalalignment='center', verticalalignment='bottom',
             fontsize=14)
@@ -191,9 +191,13 @@ def detect_microsaccades(eye_speed, t_rel_stim, threshold, min_interval, total_t
 
     for iT in tqdm(range(total_trials), desc="Detecting microsaccades"):
         peaks, _ = find_peaks(eye_speed[iT, :], height=threshold, distance=min_interval)
+        peaks = peaks[peaks > 1]  # Exclude any peaks at time 1
 
+        # Always append peaks (even if empty) to maintain trial alignment
+        saccade_samples_list.append(peaks)
+
+        # Only append to other lists when microsaccades are actually detected
         if len(peaks) > 0:
-            saccade_samples_list.append(peaks)
             saccade_trials_list.append(np.ones(len(peaks)) * iT)
             saccade_times_list.append(t_rel_stim[peaks])
 
@@ -232,6 +236,75 @@ def calculate_path_length(eye_speed, trial_attended, t_rel_stim, drift_analysis_
 
     return trial_path_length, quartile_edges, mean_attended, mean_unattended, pvalue
 
+
+def generate_microsaccade_diagnostic_pdf(pdf_path, eye_position, eye_speed, t_rel_stim,
+                                         saccade_samples, threshold, trial_attended):
+    """
+    Generate a multi-page PDF with trial-by-trial microsaccade detection diagnostics.
+
+    Args:
+        pdf_path: Path to save the PDF file
+        eye_position: Filtered eye position array [trials x time x 2]
+        eye_speed: Eye speed array [trials x time]
+        t_rel_stim: Time vector relative to stimulus onset
+        saccade_samples: List of arrays containing sample indices of detected saccades per trial
+        threshold: Velocity threshold used for detection
+        trial_attended: Array indicating attention condition per trial (1=attended, 0=unattended)
+    """
+    total_trials = eye_position.shape[0]
+
+    with PdfPages(pdf_path) as pdf:
+        for iT in tqdm(range(total_trials), desc="Generating PDF"):
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+
+            # Determine attention condition for title
+            attn_label = "Attended" if trial_attended[iT] == 1 else "Unattended"
+            fig.suptitle(f'Trial {iT+1}/{total_trials} - {attn_label}', fontsize=14, fontweight='bold')
+
+            # Top subplot: Eye position (X and Y)
+            # Plot filtered traces
+            ax1.plot(t_rel_stim, eye_position[iT, :, 0], 'C0-', label='X Position', linewidth=1.5)
+            ax1.plot(t_rel_stim, eye_position[iT, :, 1], 'C1-', label='Y Position', linewidth=1.5)
+            ax1.axvline(x=0, color='k', linestyle='--', linewidth=1, alpha=0.5, label='Stimulus Onset')
+
+            # Add vertical lines for detected microsaccades
+            if len(saccade_samples[iT]) > 0:
+                for saccade_idx in saccade_samples[iT]:
+                    ax1.axvline(x=t_rel_stim[saccade_idx], color='g', linestyle='-',
+                               linewidth=2, alpha=0.7)
+
+            ax1.set_ylabel('Position (degrees)', fontsize=11)
+            ax1.set_title('Eye Position', fontsize=12)
+            ax1.legend(loc='upper right', fontsize=9)
+            ax1.grid(True, alpha=0.3)
+            ax1.set_ylim(-1, 1)
+
+            # Bottom subplot: Eye speed
+            ax2.plot(t_rel_stim, eye_speed[iT, :], 'k-', linewidth=1.5, label='Speed')
+            ax2.axhline(y=threshold, color='orange', linestyle='--', linewidth=2,
+                       label=f'Threshold ({threshold} deg/s)', zorder=5)
+            ax2.axvline(x=0, color='k', linestyle='--', linewidth=1, alpha=0.5)
+
+            # Add vertical lines for detected microsaccades
+            if len(saccade_samples[iT]) > 0:
+                for idx, saccade_idx in enumerate(saccade_samples[iT]):
+                    label = 'Detected Saccade' if idx == 0 else None
+                    ax2.axvline(x=t_rel_stim[saccade_idx], color='g', linestyle='-',
+                               linewidth=2, alpha=0.7, label=label)
+
+            ax2.set_xlabel('Time relative to stimulus (s)', fontsize=11)
+            ax2.set_ylabel('Speed (deg/s)', fontsize=11)
+            ax2.set_title('Eye Speed', fontsize=12)
+            ax2.legend(loc='upper right', fontsize=9)
+            ax2.grid(True, alpha=0.3)
+
+            # Set consistent y-axis limits for speed
+            ax2.set_ylim(0, threshold * 4)
+
+            plt.tight_layout()
+            pdf.savefig(fig, dpi=150)
+            plt.close(fig)
+
 #%%
 # =============================================================================
 # CONFIGURATION SECTION
@@ -245,15 +318,19 @@ MONKEYS = ['monkeyF', 'monkeyN']
 CURRENT_TASK = 'lums'
 
 # Microsaccade detection parameters
-MICROSACCADE_THRESHOLD = 0.35 / 26.9 # Velocity threshold (deg/s)
+MICROSACCADE_THRESHOLD = {
+    'monkeyN': 13,  # Velocity threshold (deg/s)
+    'monkeyF': 10   # Velocity threshold (deg/s)
+}
 MIN_SACCADE_INTERVAL = 100  # Minimum time between saccades (ms at 1kHz = samples)
 EXPORT_SACCADE_PDF = False  # Export PDF with microsaccade detection for inspection
 
 # Analysis time windows
-ATTENTION_WINDOW = [0.15, 0.4]
-MICROSACCADE_WINDOW = [0, 0.5]  # Time window for microsaccade exclusion (s)
+ATTENTION_WINDOW = [0.15, 0.5]
+MICROSACCADE_WINDOW = [-.025, 0.5]  # Time window for microsaccade exclusion (s)
+MICROSACCADE_EFFECT_WINDOW = [0.075, 0.2]  # Time window for testing microsaccade effect on MUA (s)
 DRIFT_ANALYSIS_WINDOW = [0, 0.3]  # Time window for path length analysis (s)
-EYE_POSITION_WINDOW = [0.3, 0.4]  # Time window for mean position analysis (s)
+EYE_POSITION_WINDOW = [0.25, 0.4]  # Time window for mean position analysis (s)
 
 # Figure output
 SAVE_FIGS = True
@@ -449,7 +526,271 @@ plt.show()
 #%%
 print("""
 # =============================================================================
-# CONTROL 1: OVERALL EYE POSITION ANALYSIS
+# CONTROL 1: MICROSACCADE ANALYSIS
+# =============================================================================
+
+Test whether microsaccades during stimulus presentation could confound attention effects.
+
+BACKGROUND:
+Microsaccades are small, rapid eye movements (0.1-2°) that occur even during fixation.
+They can influence neural activity through both feedforward effects on the retinal image and
+corollary discharge signals. Previous studies have shown that microsaccade rate and direction
+can be modulated by attention, potentially confounding neural attention effects.
+
+HYPOTHESIS: If attention effects are due to microsaccade differences, then including only trials
+without microsaccades during stimulus presentation should eliminate the attention effect.
+
+METHOD:
+- Detect microsaccades using velocity threshold method
+- Identify trials with microsaccades during stimulus period (0-400ms)
+- Compare attention effects in trials with vs without microsaccades
+""")
+
+print("\n1. CONTROL 1: Microsaccade detection and analysis...")
+print("   Using velocity thresholding method for microsaccade detection")
+print(f"   - Threshold: MonkeyN={MICROSACCADE_THRESHOLD['monkeyN']} deg/s, MonkeyF={MICROSACCADE_THRESHOLD['monkeyF']} deg/s")
+print(f"   - Minimum intersaccade distance: {MIN_SACCADE_INTERVAL} ms")
+print(f"   - Analysis window: {MICROSACCADE_WINDOW[0]}-{MICROSACCADE_WINDOW[1]} s")
+
+# Detect microsaccades for both monkeys
+microsaccade_data = {}
+for monkey in MONKEYS:
+    data = monkey_data[monkey]
+    total_trials = data['population_mua'].shape[0]
+
+    saccade_trials, saccade_times, saccade_samples = detect_microsaccades(
+        eye_speed=data['eye_speed'],
+        t_rel_stim=data['t_rel_stim'],
+        threshold=MICROSACCADE_THRESHOLD[monkey],
+        min_interval=MIN_SACCADE_INTERVAL,
+        total_trials=total_trials
+    )
+
+    microsaccade_data[monkey] = {
+        'saccade_trials': saccade_trials,
+        'saccade_times': saccade_times,
+        'saccade_samples': saccade_samples,
+        'total_trials': total_trials
+    }
+
+    print(f'\n{monkey}:')
+    print(f'   - Detected {len(saccade_times)} microsaccades across {total_trials} trials')
+
+# Generate diagnostic PDF if requested
+if EXPORT_SACCADE_PDF:
+    print("\n   Generating diagnostic PDFs for microsaccade detection...")
+    for monkey in MONKEYS:
+        pdf_path = FIGURE_DIR / f'microsaccade_diagnostics_{monkey}.pdf'
+        generate_microsaccade_diagnostic_pdf(
+            pdf_path=pdf_path,
+            eye_position=monkey_data[monkey]['eye_position'],
+            eye_speed=monkey_data[monkey]['eye_speed'],
+            t_rel_stim=monkey_data[monkey]['t_rel_stim'],
+            saccade_samples=microsaccade_data[monkey]['saccade_samples'],
+            threshold=MICROSACCADE_THRESHOLD[monkey],
+            trial_attended=monkey_data[monkey]['trial_attended']
+        )
+        print(f'   - Saved {pdf_path}')
+
+#%%
+# Visualize microsaccade timing across all trials
+# Layout: 2 rows × 2 columns (MonkeyN left, MonkeyF right)
+fig, axs = plt.subplots(2, 2, figsize=(14, 8), sharex=True)
+fig.suptitle("Microsaccade Timing Across All Trials", fontsize=16, y=0.995)
+
+for col_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
+    msacc_data = microsaccade_data[monkey]
+    saccade_trials = msacc_data['saccade_trials']
+    saccade_times = msacc_data['saccade_times']
+    total_trials = msacc_data['total_trials']
+    t_rel_stim = monkey_data[monkey]['t_rel_stim']
+
+    # Raster plot of microsaccade times for each trial
+    if len(saccade_times) > 0:
+        axs[0, col_idx].eventplot([saccade_times[saccade_trials==iT] for iT in range(total_trials)],
+                                   linelengths=5, linewidths=2, colors='k')
+    axs[0, col_idx].axvline(x=0, color='r', linestyle='--', alpha=0.7)
+    axs[0, col_idx].set_xlim(t_rel_stim[0], t_rel_stim[-1])
+    axs[0, col_idx].set_ylim(0, total_trials)
+    axs[0, col_idx].set_ylabel('Trial')
+    axs[0, col_idx].set_title(f'{monkey.capitalize()} - Raster Plot')
+    axs[0, col_idx].grid(True, axis='x', alpha=0.3)
+
+    # Histogram of microsaccade times
+    if len(saccade_times) > 0:
+        axs[1, col_idx].hist(saccade_times, bins=np.linspace(t_rel_stim[0], t_rel_stim[-1], 70), color='k')
+    axs[1, col_idx].axvline(x=0, color='r', linestyle='--', alpha=0.7, label='Stimulus Onset')
+
+    # Add microsaccade exclusion window (shown in green)
+    axs[1, col_idx].axvspan(MICROSACCADE_WINDOW[0], MICROSACCADE_WINDOW[1],
+                            alpha=0.2, color='green', zorder=0)
+
+    # Add text label for exclusion window (only on right column to avoid clutter)
+    if col_idx == 1:
+        window_center = (MICROSACCADE_WINDOW[0] + MICROSACCADE_WINDOW[1]) / 2
+        axs[1, col_idx].text(window_center, 30, f'Saccade\nExclusion Window\n({MICROSACCADE_WINDOW[0]} - {MICROSACCADE_WINDOW[1]} s)',
+                            horizontalalignment='center', verticalalignment='bottom',
+                            fontsize=10, fontweight='bold')
+
+    # Add annotations only to the left column to avoid clutter
+    if col_idx == 0:
+        axs[1, col_idx].annotate('Pre-stimulus\nmicrosaccades', xy=(-.1, 20), 
+                 xytext=(-.075, 40),
+                 arrowprops=dict(facecolor='black', arrowstyle='->'),
+                 horizontalalignment='center')
+        axs[1, col_idx].annotate('Post-stimulus\nsuppression', xy=(0.1, 5), xytext=(0.15, 30),
+                 arrowprops=dict(facecolor='black', arrowstyle='->'),
+                 horizontalalignment='center')
+        axs[1, col_idx].annotate('Choice saccades', xy=(.45, 9), xytext=(.35, 40),
+                 arrowprops=dict(facecolor='black', arrowstyle='->'),
+                 horizontalalignment='center')
+
+    axs[1, col_idx].set_xlabel('Time (s)')
+    axs[1, col_idx].set_ylabel('Number of Saccades')
+    axs[1, col_idx].set_title(f'{monkey.capitalize()} - Rate Histogram')
+    axs[1, col_idx].legend()
+
+plt.tight_layout(rect=[0, 0, 1, 0.99])
+if SAVE_FIGS:
+    plt.savefig(FIGURE_DIR / 'microsaccade_timing.png', dpi=300)
+    plt.savefig(FIGURE_DIR / 'microsaccade_timing.svg')
+plt.show()
+
+print("   - Note the characteristic suppression of microsaccades shortly after stimulus onset.")
+print("   - Since feedforward effects are most critical, we will exclude trials with any microsaccades in the early stimulus window.")
+
+#%%
+# Compare attention effect in trials with vs. without microsaccades in the critical window.
+
+# Calculate microsaccade trial masks and MUA for both monkeys
+msacc_control_results = {}
+
+for monkey in MONKEYS:
+    msacc_data = microsaccade_data[monkey]
+    data = monkey_data[monkey]
+    saccade_trials = msacc_data['saccade_trials']
+    saccade_times = msacc_data['saccade_times']
+    total_trials = msacc_data['total_trials']
+    population_mua = data['population_mua']
+    trial_attended = data['trial_attended']
+    t_rel_stim = data['t_rel_stim']
+
+    # Identify trials that have at least one microsaccade within the specified window
+    if len(saccade_times) > 0:
+        msacc_window_mask = (saccade_times > MICROSACCADE_WINDOW[0]) & (saccade_times < MICROSACCADE_WINDOW[1])
+        trials_with_msacc = np.unique(saccade_trials[msacc_window_mask])
+    else:
+        trials_with_msacc = np.array([])
+
+    # Create a boolean mask for all trials
+    msacc_trials_mask = np.zeros(total_trials, dtype=bool)
+    if len(trials_with_msacc) > 0:
+        msacc_trials_mask[trials_with_msacc] = True
+    no_msacc_trials_mask = ~msacc_trials_mask
+
+    print(f'\n{monkey}:')
+    print(f'   - {np.sum(msacc_trials_mask)} trials WITH microsaccades between {MICROSACCADE_WINDOW[0]}-{MICROSACCADE_WINDOW[1]} s')
+    print(f'   - {np.sum(no_msacc_trials_mask)} trials WITHOUT microsaccades in this window.')
+
+    # Calculate MUA for trials without microsaccades
+    no_saccade_all_mua = population_mua[no_msacc_trials_mask].mean(axis=0)
+    no_saccade_attended_mua = population_mua[no_msacc_trials_mask & (trial_attended == 1)].mean(axis=0)
+    no_saccade_unattended_mua = population_mua[no_msacc_trials_mask & (trial_attended == 0)].mean(axis=0)
+
+    # Calculate attention window mask
+    attention_window_mask = (t_rel_stim >= ATTENTION_WINDOW[0]) & (t_rel_stim <= ATTENTION_WINDOW[1])
+
+    pval = ttest_ind(
+        population_mua[no_msacc_trials_mask & (trial_attended == 1)][:, attention_window_mask].mean(axis=1),
+        population_mua[no_msacc_trials_mask & (trial_attended == 0)][:, attention_window_mask].mean(axis=1)
+    ).pvalue
+
+    print(f'   - Attention effect in no-microsaccade trials: p = {pval:.3e}')
+
+    # Calculate MUA for saccade vs. no-saccade trials (collapsed across attention)
+    saccade_mua = population_mua[msacc_trials_mask].mean(axis=0) if np.sum(msacc_trials_mask) > 0 else np.zeros_like(t_rel_stim)
+    no_saccade_mua = population_mua[no_msacc_trials_mask].mean(axis=0)
+
+    # Calculate significance between saccade and no-saccade trials in microsaccade effect window
+    microsaccade_effect_window_mask = (t_rel_stim >= MICROSACCADE_EFFECT_WINDOW[0]) & (t_rel_stim <= MICROSACCADE_EFFECT_WINDOW[1])
+    if np.sum(msacc_trials_mask) > 0:
+        pval_saccade_effect = ttest_ind(
+            population_mua[msacc_trials_mask][:, microsaccade_effect_window_mask].mean(axis=1),
+            population_mua[no_msacc_trials_mask][:, microsaccade_effect_window_mask].mean(axis=1)
+        ).pvalue
+    else:
+        pval_saccade_effect = 1.0
+
+    msacc_control_results[monkey] = {
+        'no_saccade_all_mua': no_saccade_all_mua,
+        'no_saccade_attended_mua': no_saccade_attended_mua,
+        'no_saccade_unattended_mua': no_saccade_unattended_mua,
+        'saccade_mua': saccade_mua,
+        'no_saccade_mua': no_saccade_mua,
+        'pval': pval,
+        'pval_saccade_effect': pval_saccade_effect,
+        'n_no_msacc': np.sum(no_msacc_trials_mask)
+    }
+
+# Plotting the results (2 rows × 2 columns)
+# Row 0: Attention effect in no-saccade trials (MonkeyN left, MonkeyF right)
+# Row 1: Saccade vs no-saccade comparison (MonkeyN left, MonkeyF right)
+fig, axs = plt.subplots(2, 2, figsize=(14, 10), sharey='row')
+fig.suptitle("Controlling for Microsaccade Effects", fontsize=16, y=0.995)
+
+for col_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
+    results = msacc_control_results[monkey]
+    t_rel_stim = monkey_data[monkey]['t_rel_stim']
+
+    # Row 0: Attention effect in trials WITHOUT microsaccades
+    axs[0, col_idx].plot(t_rel_stim, results['no_saccade_all_mua'], color='gray',
+                         label='All Trials (No Msacc)', linestyle='--', alpha=0.7)
+    axs[0, col_idx].plot(t_rel_stim, results['no_saccade_unattended_mua'], label='Unattended', color='b', linewidth=2)
+    axs[0, col_idx].plot(t_rel_stim, results['no_saccade_attended_mua'], label='Attended', color='r', linewidth=2)
+    axs[0, col_idx].axvline(x=0, color='k', linestyle='--')
+
+    # Add counting window with significance
+    add_significance_window(axs[0, col_idx], ATTENTION_WINDOW, results['pval'])
+
+    axs[0, col_idx].set_title(f'{monkey.capitalize()} - Trials Without Microsaccades (N={results["n_no_msacc"]})')
+    axs[0, col_idx].set_xlabel('Time (s)')
+    axs[0, col_idx].set_ylabel('Normalized MUA')
+    axs[0, col_idx].legend()
+    axs[0, col_idx].grid(True, alpha=0.3)
+
+    # Row 1: MUA difference between saccade and no-saccade trials
+    axs[1, col_idx].plot(t_rel_stim, results['saccade_mua'], label='Saccade Trials', color='g', linewidth=2)
+    axs[1, col_idx].plot(t_rel_stim, results['no_saccade_mua'], label='No Saccade Trials', color='k', linewidth=2)
+    axs[1, col_idx].axvline(x=0, color='k', linestyle='--')
+
+    # Add significance window for saccade effect
+    add_significance_window(axs[1, col_idx], MICROSACCADE_EFFECT_WINDOW, results['pval_saccade_effect'],
+                           y_pos=0.5, bar_height=0.02)
+
+    axs[1, col_idx].set_title(f'{monkey.capitalize()} - Effect of Microsaccades on MUA')
+    axs[1, col_idx].set_xlabel('Time (s)')
+    axs[1, col_idx].set_ylabel('Normalized MUA')
+    axs[1, col_idx].legend()
+    axs[1, col_idx].grid(True, alpha=0.3)
+
+plt.tight_layout(rect=[0, 0, 1, 0.99])
+if SAVE_FIGS:
+    plt.savefig(FIGURE_DIR / 'mua_control_microsaccades.png', dpi=300)
+    plt.savefig(FIGURE_DIR / 'mua_control_microsaccades.svg')
+plt.show()
+
+print("\nCONCLUSION for Control 1:")
+print("   - A strong attention effect persists in trials completely free of microsaccades during the stimulus period.")
+print("   - Therefore, the V1 attention effect is NOT driven by microsaccadic eye movements.")
+
+#%%
+# ADD EXAMPLE OF EYE POSITION DEPENDENT CONTROL
+
+
+#%%
+print("""
+# =============================================================================
+# CONTROL 2: OVERALL EYE POSITION ANALYSIS
 # =============================================================================
 
 Test whether systematic differences in mean gaze position between attention conditions
@@ -466,7 +807,7 @@ METHOD:
 - Test for attention effects within each position quartile
 """)
 
-print("\n2. CONTROL 1: Testing for differences in eye position between attention conditions...")
+print("\n2. CONTROL 2: Testing for differences in eye position between attention conditions...")
 
 # Calculate statistics for both monkeys
 eye_pos_stats = {}
@@ -508,7 +849,7 @@ for col_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
     ax.plot(t_rel_stim, mean_att[:,0], c='r', label='Attended')
     ax.axvline(x=0, color='k', linestyle='--')
     ax.set_ylabel('Horizontal Position (degrees)')
-    ax.set_ylim(-.5, .5)
+    ax.set_ylim(-.2, .2)
     ax.set_title(f'{monkey.capitalize()} - X Position')
     ax.grid(True, alpha=0.3)
     ax.legend()
@@ -529,7 +870,7 @@ for col_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
     ax.fill_betweenx([-15, 15], EYE_POSITION_WINDOW[0], EYE_POSITION_WINDOW[1],
                      color='g', alpha=0.1, label='Position Window', zorder=0)
     ax.axvline(x=0, color='k', linestyle='--')
-    ax.set_ylim(-.5, .5)
+    ax.set_ylim(-.2, .2)
     ax.set_xlabel('Time (s)')
     ax.set_ylabel('Vertical Position (degrees)')
     ax.set_title(f'{monkey.capitalize()} - Y Position')
@@ -604,7 +945,8 @@ for col_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
     # Add mean indicators and significance connector
     ax.scatter([attn_pos_y], [60], color='r', marker='v', s=100, label='Attended Mean', zorder=5)
     ax.scatter([unattn_pos_y], [60], color='b', marker='v', s=100, label='Unattended Mean', zorder=5)
-    significance_connector(attn_pos_y, unattn_pos_y, 65, 5, f'p={pval:.3f}' if pval < 0.05 else 'n.s.')
+    pval_text = f'{pvalue_to_stars(pval)}\n(p={pval:.1e})' if pval < 0.05 else 'n.s.'
+    significance_connector(attn_pos_y, unattn_pos_y, 65, 5, pval_text, ax=ax)
 
     for e in edges:
         ax.axvline(x=e, color='k', linestyle='--', label='Quartile edges' if e == edges[0] else None, alpha=0.5)
@@ -692,221 +1034,9 @@ if SAVE_FIGS:
     plt.savefig(FIGURE_DIR / 'mua_by_eye_position_quartile.svg')
 plt.show()
 
-print("\nCONCLUSION for Control 1:")
+print("\nCONCLUSION for Control 2:")
 print("   - A robust attention effect (Attended > Unattended) is present within each eye position quartile.")
 print("   - Therefore, the V1 attention effect is NOT driven by the small systematic difference in mean eye position.")
-
-#%%
-print("""
-# =============================================================================
-# CONTROL 2: MICROSACCADE ANALYSIS
-# =============================================================================
-
-Test whether microsaccades during stimulus presentation could confound attention effects.
-
-BACKGROUND:
-Microsaccades are small, rapid eye movements (0.1-2°) that occur even during fixation.
-They can influence neural activity through both feedforward effects on the retinal image and
-corollary discharge signals. Previous studies have shown that microsaccade rate and direction
-can be modulated by attention, potentially confounding neural attention effects.
-
-HYPOTHESIS: If attention effects are due to microsaccade differences, then including only trials
-without microsaccades during stimulus presentation should eliminate the attention effect.
-
-METHOD:
-- Detect microsaccades using velocity threshold method
-- Identify trials with microsaccades during stimulus period (0-400ms)
-- Compare attention effects in trials with vs without microsaccades
-""")
-
-print("\n3. CONTROL 2: Microsaccade detection and analysis...")
-print("   Using velocity thresholding method for microsaccade detection")
-print(f"   - Threshold: {MICROSACCADE_THRESHOLD} degrees/ms")
-print(f"   - Minimum intersaccade distance: {MIN_SACCADE_INTERVAL} ms")
-print(f"   - Analysis window: {MICROSACCADE_WINDOW[0]}-{MICROSACCADE_WINDOW[1]} s")
-
-# Detect microsaccades for both monkeys
-microsaccade_data = {}
-for monkey in MONKEYS:
-    data = monkey_data[monkey]
-    total_trials = data['population_mua'].shape[0]
-
-    saccade_trials, saccade_times, saccade_samples = detect_microsaccades(
-        eye_speed=data['eye_speed'],
-        t_rel_stim=data['t_rel_stim'],
-        threshold=MICROSACCADE_THRESHOLD,
-        min_interval=MIN_SACCADE_INTERVAL,
-        total_trials=total_trials
-    )
-
-    microsaccade_data[monkey] = {
-        'saccade_trials': saccade_trials,
-        'saccade_times': saccade_times,
-        'saccade_samples': saccade_samples,
-        'total_trials': total_trials
-    }
-
-    print(f'\n{monkey}:')
-    print(f'   - Detected {len(saccade_times)} microsaccades across {total_trials} trials')
-
-#%%
-# Visualize microsaccade timing across all trials
-# Layout: 2 rows × 2 columns (MonkeyN left, MonkeyF right)
-fig, axs = plt.subplots(2, 2, figsize=(14, 8), sharex=True)
-fig.suptitle("Microsaccade Timing Across All Trials", fontsize=16, y=0.995)
-
-for col_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
-    msacc_data = microsaccade_data[monkey]
-    saccade_trials = msacc_data['saccade_trials']
-    saccade_times = msacc_data['saccade_times']
-    total_trials = msacc_data['total_trials']
-    t_rel_stim = monkey_data[monkey]['t_rel_stim']
-
-    # Raster plot of microsaccade times for each trial
-    if len(saccade_times) > 0:
-        axs[0, col_idx].eventplot([saccade_times[saccade_trials==iT] for iT in range(total_trials)],
-                                   linelengths=5, linewidths=2, colors='k')
-    axs[0, col_idx].axvline(x=0, color='r', linestyle='--', alpha=0.7)
-    axs[0, col_idx].set_xlim(t_rel_stim[0], t_rel_stim[-1])
-    axs[0, col_idx].set_ylim(0, total_trials)
-    axs[0, col_idx].set_ylabel('Trial')
-    axs[0, col_idx].set_title(f'{monkey.capitalize()} - Raster Plot')
-    axs[0, col_idx].grid(True, axis='x', alpha=0.3)
-
-    # Histogram of microsaccade times
-    if len(saccade_times) > 0:
-        axs[1, col_idx].hist(saccade_times, bins=np.linspace(t_rel_stim[0], t_rel_stim[-1], 70), color='k')
-    axs[1, col_idx].axvline(x=0, color='r', linestyle='--', alpha=0.7, label='Stimulus Onset')
-
-    # Add annotations only to the left column to avoid clutter
-    if col_idx == 0:
-        axs[1, col_idx].annotate('Pre-stimulus\nmicrosaccades', xy=(-.1, 20), xytext=(-.05, 40),
-                 arrowprops=dict(facecolor='black', arrowstyle='->'),
-                 horizontalalignment='center')
-        axs[1, col_idx].annotate('Post-stimulus\nsuppression', xy=(0.1, 5), xytext=(0.15, 30),
-                 arrowprops=dict(facecolor='black', arrowstyle='->'),
-                 horizontalalignment='center')
-        axs[1, col_idx].annotate('Choice saccades', xy=(.45, 9), xytext=(.35, 40),
-                 arrowprops=dict(facecolor='black', arrowstyle='->'),
-                 horizontalalignment='center')
-
-    axs[1, col_idx].set_xlabel('Time (s)')
-    axs[1, col_idx].set_ylabel('Number of Saccades')
-    axs[1, col_idx].set_title(f'{monkey.capitalize()} - Rate Histogram')
-    axs[1, col_idx].legend()
-
-plt.tight_layout(rect=[0, 0, 1, 0.99])
-if SAVE_FIGS:
-    plt.savefig(FIGURE_DIR / 'microsaccade_timing.png', dpi=300)
-    plt.savefig(FIGURE_DIR / 'microsaccade_timing.svg')
-plt.show()
-
-print("   - Note the characteristic suppression of microsaccades shortly after stimulus onset.")
-print("   - Since feedforward effects are most critical, we will exclude trials with any microsaccades in the early stimulus window.")
-
-#%%
-# Compare attention effect in trials with vs. without microsaccades in the critical window.
-
-# Calculate microsaccade trial masks and MUA for both monkeys
-msacc_control_results = {}
-
-for monkey in MONKEYS:
-    msacc_data = microsaccade_data[monkey]
-    data = monkey_data[monkey]
-    saccade_trials = msacc_data['saccade_trials']
-    saccade_times = msacc_data['saccade_times']
-    total_trials = msacc_data['total_trials']
-    population_mua = data['population_mua']
-    trial_attended = data['trial_attended']
-    t_rel_stim = data['t_rel_stim']
-
-    # Identify trials that have at least one microsaccade within the specified window
-    if len(saccade_times) > 0:
-        msacc_window_mask = (saccade_times > MICROSACCADE_WINDOW[0]) & (saccade_times < MICROSACCADE_WINDOW[1])
-        trials_with_msacc = np.unique(saccade_trials[msacc_window_mask])
-    else:
-        trials_with_msacc = np.array([])
-
-    # Create a boolean mask for all trials
-    msacc_trials_mask = np.zeros(total_trials, dtype=bool)
-    if len(trials_with_msacc) > 0:
-        msacc_trials_mask[trials_with_msacc] = True
-    no_msacc_trials_mask = ~msacc_trials_mask
-
-    print(f'\n{monkey}:')
-    print(f'   - {np.sum(msacc_trials_mask)} trials WITH microsaccades between {MICROSACCADE_WINDOW[0]}-{MICROSACCADE_WINDOW[1]} s')
-    print(f'   - {np.sum(no_msacc_trials_mask)} trials WITHOUT microsaccades in this window.')
-
-    # Calculate MUA for trials without microsaccades, separated by attention
-    no_saccade_attended_mua = population_mua[no_msacc_trials_mask & (trial_attended == 1)].mean(axis=0)
-    no_saccade_unattended_mua = population_mua[no_msacc_trials_mask & (trial_attended == 0)].mean(axis=0)
-
-    # Calculate attention window mask
-    attention_window_mask = (t_rel_stim >= ATTENTION_WINDOW[0]) & (t_rel_stim <= ATTENTION_WINDOW[1])
-
-    pval = ttest_ind(
-        population_mua[no_msacc_trials_mask & (trial_attended == 1)][:, attention_window_mask].mean(axis=1),
-        population_mua[no_msacc_trials_mask & (trial_attended == 0)][:, attention_window_mask].mean(axis=1)
-    ).pvalue
-
-    print(f'   - Attention effect in no-microsaccade trials: p = {pval:.3e}')
-
-    # Calculate MUA for saccade vs. no-saccade trials (collapsed across attention)
-    saccade_mua = population_mua[msacc_trials_mask].mean(axis=0) if np.sum(msacc_trials_mask) > 0 else np.zeros_like(t_rel_stim)
-    no_saccade_mua = population_mua[no_msacc_trials_mask].mean(axis=0)
-
-    msacc_control_results[monkey] = {
-        'no_saccade_attended_mua': no_saccade_attended_mua,
-        'no_saccade_unattended_mua': no_saccade_unattended_mua,
-        'saccade_mua': saccade_mua,
-        'no_saccade_mua': no_saccade_mua,
-        'pval': pval,
-        'n_no_msacc': np.sum(no_msacc_trials_mask)
-    }
-
-# Plotting the results (2 rows × 2 columns)
-# Row 0: Attention effect in no-saccade trials (MonkeyN left, MonkeyF right)
-# Row 1: Saccade vs no-saccade comparison (MonkeyN left, MonkeyF right)
-fig, axs = plt.subplots(2, 2, figsize=(14, 10), sharey='row')
-fig.suptitle("Controlling for Microsaccade Effects", fontsize=16, y=0.995)
-
-for col_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
-    results = msacc_control_results[monkey]
-    t_rel_stim = monkey_data[monkey]['t_rel_stim']
-
-    # Row 0: Attention effect in trials WITHOUT microsaccades
-    axs[0, col_idx].plot(t_rel_stim, results['no_saccade_unattended_mua'], label='Unattended', color='b')
-    axs[0, col_idx].plot(t_rel_stim, results['no_saccade_attended_mua'], label='Attended', color='r')
-    axs[0, col_idx].axvline(x=0, color='k', linestyle='--')
-
-    # Add counting window with significance
-    add_significance_window(axs[0, col_idx], ATTENTION_WINDOW, results['pval'])
-
-    axs[0, col_idx].set_title(f'{monkey.capitalize()} - Attention Effect ({results["n_no_msacc"]} Trials)')
-    axs[0, col_idx].set_xlabel('Time (s)')
-    axs[0, col_idx].set_ylabel('Normalized MUA')
-    axs[0, col_idx].legend()
-    axs[0, col_idx].grid(True, alpha=0.3)
-
-    # Row 1: MUA difference between saccade and no-saccade trials
-    axs[1, col_idx].plot(t_rel_stim, results['saccade_mua'], label='Saccade Trials', color='g')
-    axs[1, col_idx].plot(t_rel_stim, results['no_saccade_mua'], label='No Saccade Trials', color='k')
-    axs[1, col_idx].axvline(x=0, color='k', linestyle='--')
-    axs[1, col_idx].set_title(f'{monkey.capitalize()} - Saccade vs. No Saccade')
-    axs[1, col_idx].set_xlabel('Time (s)')
-    axs[1, col_idx].set_ylabel('Normalized MUA')
-    axs[1, col_idx].legend()
-    axs[1, col_idx].grid(True, alpha=0.3)
-
-plt.tight_layout(rect=[0, 0, 1, 0.99])
-if SAVE_FIGS:
-    plt.savefig(FIGURE_DIR / 'mua_control_microsaccades.png', dpi=300)
-    plt.savefig(FIGURE_DIR / 'mua_control_microsaccades.svg')
-plt.show()
-
-print("\nCONCLUSION for Control 2:")
-print("   - A strong attention effect persists in trials completely free of microsaccades during the stimulus period.")
-print("   - Therefore, the V1 attention effect is NOT driven by microsaccadic eye movements.")
 
 #%%
 print("""
@@ -932,7 +1062,8 @@ HYPOTHESIS: If attention effects are due to drift differences, then:
 3. Attention effects should disappear when controlling for path length
 """)
 
-print("\n4. CONTROL 3: Ocular drift (path length) analysis...")
+
+print("\n3. CONTROL 3: Ocular drift (path length) analysis...")
 print(f"   - Analysis window: {DRIFT_ANALYSIS_WINDOW[0]}-{DRIFT_ANALYSIS_WINDOW[1]} s")
 
 # Calculate path length statistics for both monkeys
@@ -1085,11 +1216,13 @@ print("\n" + "="*70)
 print("SUMMARY OF EYE MOVEMENT CONTROLS")
 print("="*70)
 print("The three comprehensive eye movement controls demonstrate that:")
-print("1. EYE POSITION CONTROL: Attention effects persist within each eye position quartile.")
-print("2. MICROSACCADE CONTROL: Attention effects remain in trials without microsaccades.")
+print("1. MICROSACCADE CONTROL: Attention effects remain in trials without microsaccades.")
+print("2. EYE POSITION CONTROL: Attention effects persist within each eye position quartile.")
 print("3. DRIFT CONTROL: Attention effects are present across all ocular drift levels.")
 print()
 print("CONCLUSION:")
 print("These controls were unable to explain away the V1 attentional affects as being")
 print("due to eye movements during fixation.")
 print("="*70)
+
+
