@@ -21,6 +21,8 @@ dependencies = [
     "mat73",
     "tqdm",
     "ipykernel",
+    "pandas",
+    "statsmodels",
 ]
 
 [tool.hatch.build.targets.wheel]

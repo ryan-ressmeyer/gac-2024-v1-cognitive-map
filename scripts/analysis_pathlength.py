@@ -108,22 +108,25 @@ def calculate_path_length(eye_speed, trial_attended, t_rel_stim, drift_analysis_
     Calculate path length (cumulative eye speed) statistics and quartiles.
 
     Args:
-        eye_speed: Eye speed array [trials x time]
+        eye_speed: Eye speed array [trials x time] in deg/s
         trial_attended: Binary array indicating attended (1) vs unattended (0) trials
         t_rel_stim: Time vector relative to stimulus onset
         drift_analysis_window: Tuple of (start_time, end_time) for drift analysis
         **kwargs: Additional arguments (ignored, allows passing full data dict)
 
     Returns:
-        trial_path_length: path length for each trial
+        trial_path_length: path length for each trial in degrees
         quartile_edges: bin edges for quartile analysis
         mean_attended: mean path length for attended trials
         mean_unattended: mean path length for unattended trials
         pvalue: t-test p-value for path length difference
     """
-    # Calculate path length for each trial
+    # Calculate dt from the time vector
+    dt = t_rel_stim[1] - t_rel_stim[0]
+
+    # Calculate path length for each trial (integrate speed over time to get distance in degrees)
     drift_mask = (t_rel_stim >= drift_analysis_window[0]) & (t_rel_stim <= drift_analysis_window[1])
-    trial_path_length = np.sum(eye_speed[:, drift_mask], axis=1)
+    trial_path_length = np.sum(eye_speed[:, drift_mask], axis=1) * dt
 
     # Calculate quartile edges
     quartile_edges = np.percentile(trial_path_length, np.linspace(0, 100, 5))
@@ -259,7 +262,7 @@ for col_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
 
     ax.legend()
     ax.set_title(f'Monkey {monkey[-1].upper()} - Path Lengths ({DRIFT_ANALYSIS_WINDOW[0]}-{DRIFT_ANALYSIS_WINDOW[1]}s)')
-    ax.set_xlabel('Path Length (arbitrary units)')
+    ax.set_xlabel('Path Length (degrees)')
     ax.set_ylabel('Number of Trials')
 
 fig.suptitle('Distribution of Path Lengths', fontsize=16, y=1.00)
@@ -341,6 +344,201 @@ if SAVE_FIGS:
     plt.savefig(FIGURE_DIR / 'mua_by_path_length_quartile.svg')
 plt.show()
 
+#%%
+# =============================================================================
+# COMBINED CONTROL: Full Interaction Regression Plot
+# =============================================================================
+try:
+    # Use the formula API for easier model specification
+    import statsmodels.formula.api as smf
+    import pandas as pd
+except ImportError:
+    print("\n---")
+    print("ERROR: This analysis requires 'statsmodels' and 'pandas'.")
+    print("Please install them by running: uv pip install statsmodels pandas")
+    print("---")
+    raise
+
+print("\n" + "="*70)
+print("Combined Control: Multiple Linear Regression with Interaction")
+print("="*70)
+print("Testing main effects and interaction effects in one model.")
+print("Model: MUA_mean ~ β₁*attention + β₂*path_length + β₃*(attention*path_length)")
+
+# This will store the results text for each monkey
+interaction_regression_summaries = {}
+
+for monkey in MONKEYS:
+    print(f"\n--- Analyzing {monkey} ---")
+
+    data = monkey_data[monkey]
+    path_data = path_length_data[monkey]
+
+    # 1. Prepare the Dependent Variable (Y): Mean MUA
+    t_rel_stim = data['t_rel_stim']
+    attention_window_mask = (t_rel_stim >= ATTENTION_WINDOW[0]) & (t_rel_stim <= ATTENTION_WINDOW[1])
+    trial_mua_mean = data['population_mua'][:, attention_window_mask].mean(axis=1)
+
+    # 2. Prepare the Independent Variables (X)
+    trial_attended = data['trial_attended']
+    trial_path_length = path_data['trial_path_length']
+
+    # Demean path_length for regression (centering at mean)
+    path_length_mean = trial_path_length.mean()
+    trial_path_length_demeaned = trial_path_length - path_length_mean
+
+    # 3. Create a Pandas DataFrame
+    df = pd.DataFrame({
+        'mua_mean': trial_mua_mean,
+        'attention': trial_attended,
+        'path_length': trial_path_length_demeaned,
+        'path_length_raw': trial_path_length  # Keep raw values for plotting
+    })
+
+    # 4. Define and Fit the Model (using demeaned path_length)
+    model = smf.ols(formula='mua_mean ~ attention * path_length', data=df).fit()
+
+    # 5. Print and store the results
+    print(model.summary())
+    interaction_regression_summaries[monkey] = model.summary()
+
+    # 6. Get key results for interpretation
+    p_val_attn = model.pvalues['attention']
+    p_val_path = model.pvalues['path_length']
+    p_val_interact = model.pvalues['attention:path_length']
+
+    print("\n--- Interpretation ---")
+    print(f"p-value for β₁ (Attention): {p_val_attn:.3f}")
+    print(f"p-value for β₂ (Path Length): {p_val_path:.3f}")
+    print(f"p-value for β₃ (Interaction): {p_val_interact:.3f}")
+
+    if p_val_interact < 0.05:
+        print("CONCLUSION: The interaction is STATISTICALLY SIGNIFICANT (p < 0.05)")
+    else:
+        print("CONCLUSION: The interaction is NOT statistically significant (p >= 0.05)")
+    print("="*70)
+
+    # Store data for combined plotting
+    if monkey == MONKEYS[0]:
+        monkey_regression_data = {}
+
+    monkey_regression_data[monkey] = {
+        'df': df,
+        'model': model,
+        'p_val_attn': p_val_attn,
+        'p_val_path': p_val_path,
+        'p_val_interact': p_val_interact,
+        'path_length_mean': path_length_mean
+    }
+
+# ==========================================================
+# --- COMBINED PRESENTATION PLOT ---
+# ==========================================================
+
+print("\n   Generating combined presentation plot with 95% CI for both monkeys...")
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+
+# Helper function to format p-values
+def format_p(p_val):
+    if p_val < 0.001:
+        return "p < 0.001"
+    else:
+        return f"p = {p_val:.3f}"
+
+for col_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
+    ax = axes[col_idx]
+
+    # Get stored data
+    data_dict = monkey_regression_data[monkey]
+    df = data_dict['df']
+    model = data_dict['model']
+    p_val_attn = data_dict['p_val_attn']
+    p_val_path = data_dict['p_val_path']
+    p_val_interact = data_dict['p_val_interact']
+    path_length_mean = data_dict['path_length_mean']
+
+    # 1. Plot the raw data points (using raw path_length for x-axis)
+    ax.scatter(df[df['attention'] == 0]['path_length_raw'], df[df['attention'] == 0]['mua_mean'],
+               c='b', alpha=0.15, label='Unattended Trials', s=15)
+    ax.scatter(df[df['attention'] == 1]['path_length_raw'], df[df['attention'] == 1]['mua_mean'],
+               c='r', alpha=0.15, label='Attended Trials', s=15)
+
+    # 2. Generate prediction dataframes (use demeaned values for prediction, raw for plotting)
+    x_line_raw = np.linspace(df['path_length_raw'].min(), df['path_length_raw'].max(), 100)
+    x_line_demeaned = x_line_raw - path_length_mean
+    unattn_pred_data = pd.DataFrame({'path_length': x_line_demeaned, 'attention': np.zeros(100)})
+    attn_pred_data = pd.DataFrame({'path_length': x_line_demeaned, 'attention': np.ones(100)})
+
+    # 3. Get predictions and 95% confidence intervals
+    unattn_pred = model.get_prediction(unattn_pred_data)
+    unattn_ci = unattn_pred.summary_frame(alpha=0.05)
+
+    attn_pred = model.get_prediction(attn_pred_data)
+    attn_ci = attn_pred.summary_frame(alpha=0.05)
+
+    # 4. Plot the regression lines (use raw x values for plotting)
+    ax.plot(x_line_raw, unattn_ci['mean'], 'b', linewidth=3, label='Unattended Fit')
+    ax.plot(x_line_raw, attn_ci['mean'], 'r', linewidth=3, label='Attended Fit')
+
+    # 5. Plot the 95% confidence intervals (use raw x values for plotting)
+    ax.fill_between(x_line_raw,
+                    unattn_ci['mean_ci_lower'],
+                    unattn_ci['mean_ci_upper'],
+                    color='b', alpha=0.15, label='95% CI')
+
+    ax.fill_between(x_line_raw,
+                    attn_ci['mean_ci_lower'],
+                    attn_ci['mean_ci_upper'],
+                    color='r', alpha=0.15, label='95% CI')
+
+    # 6. Add p-value text box with note about centering
+    text_str = (f"β₁ (Attention): {format_p(p_val_attn)}\n"
+                f"β₂ (Path Length):  {format_p(p_val_path)}\n"
+                f"β₃ (Interaction): {format_p(p_val_interact)}\n"
+                f"(βs at mean path length: {path_length_mean:.3f}°)")
+
+    ax.text(0.04, 0.96, text_str,
+            transform=ax.transAxes,
+            ha='left', va='top', fontsize=11,
+            bbox=dict(facecolor='white', alpha=0.8, boxstyle='round,pad=0.5'))
+
+    # Consolidate legends
+    handles, labels = ax.get_legend_handles_labels()
+    # Remove duplicate CI label
+    by_label = dict(zip(labels, handles))
+    if monkey == 'monkeyN':
+        ax.legend(by_label.values(), by_label.keys(), loc='lower right')
+
+    ax.set_xlabel('Path Length (degrees)')
+    ax.set_ylabel(f'Mean Normalized MUA ({ATTENTION_WINDOW[0]}-{ATTENTION_WINDOW[1]}s)')
+    ax.set_title(f'Monkey {monkey[-1].upper()}')
+    ax.grid(True, alpha=0.3)
+
+fig.suptitle('MUA = β₀ + (β₁ × Attention) + (β₂ × Path_Length) + (β₃ × Attention × Path_Length)',
+             fontsize=14, y=0.98)
+plt.tight_layout()
+
+if SAVE_FIGS:
+    fig.savefig(FIGURE_DIR / 'mua_vs_pathlength_interaction_summary_combined.png', dpi=300)
+    fig.savefig(FIGURE_DIR / 'mua_vs_pathlength_interaction_summary_combined.svg')
+plt.show()
+
+# Save the full text summaries to a file
+if SAVE_FIGS:
+    summary_path = FIGURE_DIR / 'interaction_regression_summary.txt'
+    print(f"\nSaving full interaction regression summaries to: {summary_path}")
+    with open(summary_path, 'w') as f:
+        f.write("Interaction Regression Summary: Monkey N\n")
+        f.write(str(interaction_regression_summaries.get('monkeyN', 'Not run.')))
+        f.write("\n\n" + "="*80 + "\n\n")
+        f.write("Interaction Regression Summary: Monkey F\n")
+        f.write(str(interaction_regression_summaries.get('monkeyF', 'Not run.')))
+
+print("\nInteraction regression analysis complete.")
+print("="*70)
+
+#%%
 print("\n" + "="*70)
 print("KEY FINDING: Attention effects persist across all path length quartiles.")
 print("="*70)

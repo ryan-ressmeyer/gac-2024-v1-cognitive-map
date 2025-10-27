@@ -510,3 +510,188 @@ print("each eye position quartile.")
 print("\nTherefore, the V1 attention effect is NOT driven by the small")
 print("systematic difference in mean eye position.")
 print("="*70)
+
+#%%
+# =============================================================================
+# CONTROL 3: Full Interaction Regression Plot
+# =============================================================================
+try:
+    # Use the formula API for easier model specification
+    import statsmodels.formula.api as smf
+    import pandas as pd
+except ImportError:
+    print("\n---")
+    print("ERROR: This analysis requires 'statsmodels' and 'pandas'.")
+    print("Please install them by running: uv pip install statsmodels pandas")
+    print("---")
+    raise
+
+print("\n" + "="*70)
+print("Combined Control: Multiple Linear Regression with Interaction")
+print("="*70)
+print("Testing main effects and interaction effects in one model.")
+print("Model: MUA_mean ~ β₁*attention + β₂*eye_pos_y + β₃*(attention*eye_pos_y)")
+
+# This will store the results text for each monkey
+interaction_regression_summaries = {}
+
+for monkey in MONKEYS:
+    print(f"\n--- Analyzing {monkey} ---")
+    
+    data = monkey_data[monkey]
+    pos_data = position_data[monkey] 
+    
+    # 1. Prepare the Dependent Variable (Y): Mean MUA
+    t_rel_stim = data['t_rel_stim']
+    attention_window_mask = (t_rel_stim >= ATTENTION_WINDOW[0]) & (t_rel_stim <= ATTENTION_WINDOW[1])
+    trial_mua_mean = data['population_mua'][:, attention_window_mask].mean(axis=1)
+
+    # 2. Prepare the Independent Variables (X)
+    trial_attended = data['trial_attended']
+    trial_pos_y = pos_data['trial_pos_y']
+
+    # 3. Create a Pandas DataFrame
+    df = pd.DataFrame({
+        'mua_mean': trial_mua_mean,
+        'attention': trial_attended,
+        'eye_pos_y': trial_pos_y
+    })
+
+    # 4. Define and Fit the Model
+    model = smf.ols(formula='mua_mean ~ attention * eye_pos_y', data=df).fit()
+
+    # 5. Print and store the results
+    print(model.summary())
+    interaction_regression_summaries[monkey] = model.summary()
+
+    # 6. Get key results for interpretation
+    p_val_attn = model.pvalues['attention']
+    p_val_pos = model.pvalues['eye_pos_y']
+    p_val_interact = model.pvalues['attention:eye_pos_y']
+    
+    print("\n--- Interpretation ---")
+    print(f"p-value for β₁ (Attention): {p_val_attn:.3f}")
+    print(f"p-value for β₂ (Position): {p_val_pos:.3f}")
+    print(f"p-value for β₃ (Interaction): {p_val_interact:.3f}")
+    
+    if p_val_interact < 0.05:
+        print("CONCLUSION: The interaction is STATISTICALLY SIGNIFICANT (p < 0.05)")
+    else:
+        print("CONCLUSION: The interaction is NOT statistically significant (p >= 0.05)")
+    print("="*70)
+
+    # Store data for combined plotting
+    if monkey == MONKEYS[0]:
+        monkey_regression_data = {}
+
+    monkey_regression_data[monkey] = {
+        'df': df,
+        'model': model,
+        'p_val_attn': p_val_attn,
+        'p_val_pos': p_val_pos,
+        'p_val_interact': p_val_interact
+    }
+
+# ==========================================================
+# --- COMBINED PRESENTATION PLOT ---
+# ==========================================================
+
+print("\n   Generating combined presentation plot with 95% CI for both monkeys...")
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+
+# Helper function to format p-values
+def format_p(p_val):
+    if p_val < 0.001:
+        return "p < 0.001"
+    else:
+        return f"p = {p_val:.3f}"
+
+for col_idx, monkey in enumerate(['monkeyN', 'monkeyF']):
+    ax = axes[col_idx]
+
+    # Get stored data
+    data_dict = monkey_regression_data[monkey]
+    df = data_dict['df']
+    model = data_dict['model']
+    p_val_attn = data_dict['p_val_attn']
+    p_val_pos = data_dict['p_val_pos']
+    p_val_interact = data_dict['p_val_interact']
+
+    # 1. Plot the raw data points
+    ax.scatter(df[df['attention'] == 0]['eye_pos_y'], df[df['attention'] == 0]['mua_mean'],
+               c='b', alpha=0.15, label='Unattended Trials', s=15)
+    ax.scatter(df[df['attention'] == 1]['eye_pos_y'], df[df['attention'] == 1]['mua_mean'],
+               c='r', alpha=0.15, label='Attended Trials', s=15)
+
+    # 2. Generate prediction dataframes
+    x_line = np.linspace(df['eye_pos_y'].min(), df['eye_pos_y'].max(), 100)
+    unattn_pred_data = pd.DataFrame({'eye_pos_y': x_line, 'attention': np.zeros(100)})
+    attn_pred_data = pd.DataFrame({'eye_pos_y': x_line, 'attention': np.ones(100)})
+
+    # 3. Get predictions and 95% confidence intervals
+    unattn_pred = model.get_prediction(unattn_pred_data)
+    unattn_ci = unattn_pred.summary_frame(alpha=0.05)
+
+    attn_pred = model.get_prediction(attn_pred_data)
+    attn_ci = attn_pred.summary_frame(alpha=0.05)
+
+    # 4. Plot the regression lines
+    ax.plot(x_line, unattn_ci['mean'], 'b', linewidth=3, label='Unattended Fit')
+    ax.plot(x_line, attn_ci['mean'], 'r', linewidth=3, label='Attended Fit')
+
+    # 5. Plot the 95% confidence intervals
+    ax.fill_between(x_line,
+                    unattn_ci['mean_ci_lower'],
+                    unattn_ci['mean_ci_upper'],
+                    color='b', alpha=0.15, label='95% CI')
+
+    ax.fill_between(x_line,
+                    attn_ci['mean_ci_lower'],
+                    attn_ci['mean_ci_upper'],
+                    color='r', alpha=0.15, label='95% CI')
+
+    # 6. Add p-value text box
+    text_str = (f"β₁ (Attention): {format_p(p_val_attn)}\n"
+                f"β₂ (Position):  {format_p(p_val_pos)}\n"
+                f"β₃ (Interaction): {format_p(p_val_interact)}")
+
+    ax.text(0.04, 0.96, text_str,
+            transform=ax.transAxes,
+            ha='left', va='top', fontsize=11,
+            bbox=dict(facecolor='white', alpha=0.8, boxstyle='round,pad=0.5'))
+
+    # Consolidate legends
+    handles, labels = ax.get_legend_handles_labels()
+    # Remove duplicate CI label
+    by_label = dict(zip(labels, handles))
+    if monkey == 'monkeyN':
+        ax.legend(by_label.values(), by_label.keys(), loc='lower right')
+
+    ax.set_xlabel('Mean Vertical Eye Position (degrees)')
+    ax.set_ylabel(f'Mean Normalized MUA ({ATTENTION_WINDOW[0]}-{ATTENTION_WINDOW[1]}s)')
+    ax.set_title(f'Monkey {monkey[-1].upper()}')
+    ax.grid(True, alpha=0.3)
+
+fig.suptitle('MUA = β₀ + (β₁ × Attention) + (β₂ × Eye_Pos_Y) + (β₃ × Attention × Eye_Pos_Y)',
+             fontsize=14, y=0.98)
+plt.tight_layout()
+
+if SAVE_FIGS:
+    fig.savefig(FIGURE_DIR / 'mua_vs_position_interaction_summary_combined.png', dpi=300)
+    fig.savefig(FIGURE_DIR / 'mua_vs_position_interaction_summary_combined.svg')
+plt.show()
+
+# Save the full text summaries to a file
+if SAVE_FIGS:
+    summary_path = FIGURE_DIR / 'interaction_regression_summary.txt'
+    print(f"\nSaving full interaction regression summaries to: {summary_path}")
+    with open(summary_path, 'w') as f:
+        f.write("Interaction Regression Summary: Monkey N\n")
+        f.write(str(interaction_regression_summaries.get('monkeyN', 'Not run.')))
+        f.write("\n\n" + "="*80 + "\n\n")
+        f.write("Interaction Regression Summary: Monkey F\n")
+        f.write(str(interaction_regression_summaries.get('monkeyF', 'Not run.')))
+
+print("\nInteraction regression analysis complete.")
+print("="*70)
