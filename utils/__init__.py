@@ -63,3 +63,53 @@ def loadmat(filename):
         return loadmat_mat73(filename)
 
 
+def pvalue_to_stars(pval):
+    """
+    Convert p-value to star notation for significance display.
+
+    Args:
+        pval: p-value from statistical test
+
+    Returns:
+        str: Star notation (*** for p<0.001, ** for p<0.01, * for p<0.05, n.s. otherwise)
+    """
+    if pval < 0.001:
+        return '***'
+    elif pval < 0.01:
+        return '**'
+    elif pval < 0.05:
+        return '*'
+    else:
+        return 'n.s.'
+
+
+def add_significance_window(ax, window, pval, y_pos=0.6, bar_height=0.02):
+    """
+    Add a horizontal bar showing the counting window with significance stars.
+
+    Args:
+        ax: matplotlib axis
+        window: tuple of (start_time, end_time) for the counting window
+        pval: p-value to display
+        y_pos: y-position for the bar (default 0.6)
+        bar_height: height of the bar in data coordinates
+    """
+    # Draw horizontal bar for the window
+    ax.plot([window[0], window[1]], [y_pos, y_pos], 'k-', linewidth=3, solid_capstyle='butt')
+
+    # Add vertical caps at the ends
+    ax.plot([window[0], window[0]], [y_pos - bar_height/2, y_pos + bar_height/2], 'k-', linewidth=2)
+    ax.plot([window[1], window[1]], [y_pos - bar_height/2, y_pos + bar_height/2], 'k-', linewidth=2)
+
+    # Add p-value text with stars above the bar
+    stars = pvalue_to_stars(pval)
+    window_center = (window[0] + window[1]) / 2
+    if stars == 'n.s.':
+        text = f'{stars}\n(p={pval:.3f})'
+    else:
+        text = f'{stars}\n(p={pval:.1e})'
+    ax.text(window_center, y_pos + 0.05, text,
+            horizontalalignment='center', verticalalignment='bottom',
+            fontsize=14)
+
+
